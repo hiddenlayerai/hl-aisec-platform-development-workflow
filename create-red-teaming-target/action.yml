@@ -1,0 +1,123 @@
+name: 'Create Red Teaming Target'
+description: 'Creates or updates a red teaming target in HiddenLayer platform'
+inputs:
+  target-name:
+    description: 'Name of the target to create'
+    required: true
+  target-url:
+    description: 'URL of the target endpoint'
+    required: true
+  client-id:
+    description: 'HiddenLayer Client ID'
+    required: true
+  client-secret:
+    description: 'HiddenLayer Client Secret'
+    required: true
+  api-url:
+    description: 'HiddenLayer API URL'
+    required: false
+    default: 'https://api.us.hiddenlayer.ai'
+  auth-url:
+    description: 'HiddenLayer Auth URL'
+    required: false
+    default: 'https://auth.hiddenlayer.ai'
+  custom-headers:
+    description: 'Custom headers for the target (JSON format)'
+    required: false
+    default: '{}'
+outputs:
+  target-created:
+    description: 'Whether the target was successfully created/updated'
+    value: ${{ steps.create-target.outputs.target-created }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Authenticate with HiddenLayer
+      id: auth
+      uses: hiddenlayerai/hl-aisec-platform-development-workflow/hiddenlayer-auth@v2
+      with:
+        client-id: ${{ inputs.client-id }}
+        client-secret: ${{ inputs.client-secret }}
+        auth-url: ${{ inputs.auth-url }}
+    
+    - name: Create or Update Target
+      id: create-target
+      shell: bash
+      run: |
+        echo "::group::Creating/Updating Red Teaming Target"
+        
+        # Get the access token
+        ACCESS_TOKEN="${{ steps.auth.outputs.decoded-token }}"
+        
+        if [ -z "$ACCESS_TOKEN" ]; then
+          echo "::error::Failed to get access token"
+          exit 1
+        fi
+        
+        # Prepare the request body
+        REQUEST_BODY=$(cat <<EOF
+        {
+          "target_name": "${{ inputs.target-name }}",
+          "target_url": "${{ inputs.target-url }}",
+          "custom_headers": ${{ inputs.custom-headers }}
+        }
+        EOF
+        )
+        
+        echo "📋 Target Configuration:"
+        echo "  Name: ${{ inputs.target-name }}"
+        echo "  URL: ${{ inputs.target-url }}"
+        echo "  API Endpoint: ${{ inputs.api-url }}/red-teaming/v1/targets"
+        
+        # Make the API call
+        response=$(curl -s -w '\n%{http_code}' \
+          -X POST \
+          -H "Authorization: Bearer $ACCESS_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d "$REQUEST_BODY" \
+          "${{ inputs.api-url }}/red-teaming/v1/targets")
+        
+        # Extract HTTP status code and response body
+        http_code=$(echo "$response" | tail -n1)
+        body=$(echo "$response" | sed '$d')
+        
+        # Check for successful response (200-299 range)
+        if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+          echo "✅ Target created/updated successfully (HTTP $http_code)"
+          echo "target-created=true" >> $GITHUB_OUTPUT
+          
+          # Try to extract target details from response
+          if [ -n "$body" ]; then
+            echo "Response: $body" | jq '.' 2>/dev/null || echo "Response: $body"
+          fi
+        else
+          echo "::error::Failed to create/update target (HTTP $http_code)"
+          echo "Response: $body" | jq '.' 2>/dev/null || echo "Response: $body"
+          echo "target-created=false" >> $GITHUB_OUTPUT
+          
+          # Provide helpful error messages
+          case "$http_code" in
+            401)
+              echo "::error::Unauthorized - Check your credentials"
+              ;;
+            409)
+              echo "::warning::Target might already exist - this is usually OK"
+              # Don't fail on 409 as the target exists
+              echo "target-created=true" >> $GITHUB_OUTPUT
+              ;;
+            400)
+              echo "::error::Bad request - Check target name and URL format"
+              ;;
+            *)
+              echo "::error::Unexpected error occurred"
+              ;;
+          esac
+          
+          # Only fail on non-409 errors
+          if [ "$http_code" != "409" ]; then
+            exit 1
+          fi
+        fi
+        
+        echo "::endgroup::" 

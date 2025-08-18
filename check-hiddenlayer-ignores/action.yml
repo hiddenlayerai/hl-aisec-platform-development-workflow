@@ -1,0 +1,117 @@
+name: 'Check HiddenLayer Ignores'
+description: 'Check scan results against .hiddenlayer ignore file with expiration dates'
+inputs:
+  scan-results-file:
+    description: 'Path to scan results JSON file'
+    required: true
+  hiddenlayer-file:
+    description: 'Path to .hiddenlayer file'
+    required: false
+    default: '.hiddenlayer'
+outputs:
+  has-actionable-detections:
+    description: 'Whether there are detections that are not ignored or have expired ignores'
+    value: ${{ steps.check.outputs.has-actionable-detections }}
+  actionable-rule-ids:
+    description: 'Comma-separated list of rule IDs that are not ignored or have expired'
+    value: ${{ steps.check.outputs.actionable-rule-ids }}
+  ignored-rule-ids:
+    description: 'Comma-separated list of rule IDs that are ignored and not expired'
+    value: ${{ steps.check.outputs.ignored-rule-ids }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install yq
+      shell: bash
+      run: |
+        if ! command -v yq &> /dev/null; then
+          echo "::group::Installing yq"
+          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /tmp/yq
+          chmod +x /tmp/yq
+          sudo mv /tmp/yq /usr/local/bin/yq
+          echo "::endgroup::"
+        fi
+    
+    - name: Check detections against ignore file
+      id: check
+      shell: bash
+      run: |
+        # Check if .hiddenlayer file exists
+        if [ ! -f "${{ inputs.hiddenlayer-file }}" ]; then
+          echo "::notice::No .hiddenlayer file found, all detections will be considered actionable"
+          
+          # Extract all rule IDs from scan results
+          rule_ids=$(jq -r '.file_results[].detections[].rule_id' "${{ inputs.scan-results-file }}" 2>/dev/null | sort | uniq | paste -sd "," -)
+          
+          if [ -n "$rule_ids" ]; then
+            echo "has-actionable-detections=true" >> $GITHUB_OUTPUT
+            echo "actionable-rule-ids=$rule_ids" >> $GITHUB_OUTPUT
+            echo "ignored-rule-ids=" >> $GITHUB_OUTPUT
+          else
+            echo "has-actionable-detections=false" >> $GITHUB_OUTPUT
+            echo "actionable-rule-ids=" >> $GITHUB_OUTPUT
+            echo "ignored-rule-ids=" >> $GITHUB_OUTPUT
+          fi
+          exit 0
+        fi
+        
+        echo "::group::Processing detections against .hiddenlayer ignore file"
+        
+        # Get current date
+        CURRENT_DATE=$(date +%Y-%m-%d)
+        echo "Current date: $CURRENT_DATE"
+        
+        # Extract all rule IDs from scan results
+        all_rule_ids=$(jq -r '.file_results[].detections[].rule_id' "${{ inputs.scan-results-file }}" 2>/dev/null | sort | uniq)
+        
+        # Initialize arrays for tracking
+        actionable_rules=()
+        ignored_rules=()
+        
+        # Check each rule ID
+        while IFS= read -r rule_id; do
+          if [ -z "$rule_id" ]; then
+            continue
+          fi
+          
+          echo "Checking rule: $rule_id"
+          
+          # Check if rule is in ignore list
+          expiry_date=$(yq -r ".ignore[\"$rule_id\"].expires // \"\"" "${{ inputs.hiddenlayer-file }}")
+          reason=$(yq -r ".ignore[\"$rule_id\"].reason // \"\"" "${{ inputs.hiddenlayer-file }}")
+          
+          if [ -z "$expiry_date" ]; then
+            echo "  ❌ Not in ignore list - ACTIONABLE"
+            actionable_rules+=("$rule_id")
+          elif [[ "$CURRENT_DATE" < "$expiry_date" || "$CURRENT_DATE" == "$expiry_date" ]]; then
+            echo "  ✅ Ignored until $expiry_date - Reason: $reason"
+            ignored_rules+=("$rule_id")
+          else
+            echo "  ⚠️  Ignore expired on $expiry_date - ACTIONABLE"
+            actionable_rules+=("$rule_id")
+          fi
+        done <<< "$all_rule_ids"
+        
+        echo "::endgroup::"
+        
+        # Convert arrays to comma-separated strings
+        actionable_rules_str=$(IFS=,; echo "${actionable_rules[*]}")
+        ignored_rules_str=$(IFS=,; echo "${ignored_rules[*]}")
+        
+        # Set outputs
+        if [ ${#actionable_rules[@]} -gt 0 ]; then
+          echo "has-actionable-detections=true" >> $GITHUB_OUTPUT
+          echo "actionable-rule-ids=$actionable_rules_str" >> $GITHUB_OUTPUT
+          echo "::warning::Found ${#actionable_rules[@]} actionable detection(s): $actionable_rules_str"
+        else
+          echo "has-actionable-detections=false" >> $GITHUB_OUTPUT
+          echo "actionable-rule-ids=" >> $GITHUB_OUTPUT
+          echo "::notice::No actionable detections found - all detections are ignored and not expired"
+        fi
+        
+        echo "ignored-rule-ids=$ignored_rules_str" >> $GITHUB_OUTPUT
+        
+        if [ ${#ignored_rules[@]} -gt 0 ]; then
+          echo "::notice::Ignored ${#ignored_rules[@]} detection(s) that haven't expired: $ignored_rules_str"
+        fi 

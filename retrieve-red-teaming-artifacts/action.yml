@@ -1,0 +1,258 @@
+name: 'Retrieve Red Teaming Artifacts from HiddenLayer'
+description: 'Downloads red teaming report artifacts (CSV files in ZIP) from HiddenLayer API'
+inputs:
+  scan-id:
+    description: 'Red teaming scan ID'
+    required: true
+  client-id:
+    description: 'HiddenLayer Client ID'
+    required: true
+  client-secret:
+    description: 'HiddenLayer Client Secret'
+    required: true
+  auth-url:
+    description: 'HiddenLayer Auth URL'
+    required: false
+    default: 'https://auth.hiddenlayer.ai'
+  api-url:
+    description: 'HiddenLayer API URL'
+    required: false
+    default: 'https://api.us.hiddenlayer.ai'
+  output-file:
+    description: 'Output ZIP file name'
+    required: false
+    default: 'red-teaming-artifacts.zip'
+  extract-files:
+    description: 'Whether to extract the ZIP file'
+    required: false
+    default: 'true'
+outputs:
+  artifacts-file:
+    description: 'Path to downloaded artifacts ZIP file'
+    value: ${{ steps.download.outputs.artifacts-file }}
+  artifacts-dir:
+    description: 'Directory containing extracted artifacts (if extracted)'
+    value: ${{ steps.extract.outputs.artifacts-dir }}
+  retrieval-status:
+    description: 'Status of retrieval (success or failed)'
+    value: ${{ steps.download.outputs.retrieval-status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Authenticate with HiddenLayer
+      id: auth
+      shell: bash
+      env:
+        CLIENT_ID: ${{ inputs.client-id }}
+        CLIENT_SECRET: ${{ inputs.client-secret }}
+        AUTH_URL: ${{ inputs.auth-url }}
+      run: |
+        echo "::group::Authenticating with HiddenLayer"
+        
+        # Authenticate and get access token
+        auth_response=$(curl -s -X POST \
+          "$AUTH_URL/oauth2/token?grant_type=client_credentials" \
+          -u "$CLIENT_ID:$CLIENT_SECRET")
+        
+        # Extract access token
+        access_token=$(echo "$auth_response" | jq -r '.access_token')
+        
+        if [ -z "$access_token" ] || [ "$access_token" == "null" ]; then
+          echo "::warning::Failed to authenticate with HiddenLayer for artifact retrieval"
+          echo "Response: $auth_response"
+          echo "retrieval-status=failed" >> $GITHUB_OUTPUT
+          exit 0  # Exit gracefully
+        fi
+        
+        echo "✅ Successfully authenticated"
+        echo "::add-mask::$access_token"
+        echo "access-token=$access_token" >> $GITHUB_OUTPUT
+        
+        echo "::endgroup::"
+    
+    - name: Download Red Teaming Artifacts
+      id: download
+      shell: bash
+      env:
+        SCAN_ID: ${{ inputs.scan-id }}
+        API_URL: ${{ inputs.api-url }}
+        ACCESS_TOKEN: ${{ steps.auth.outputs.access-token }}
+        OUTPUT_FILE: ${{ inputs.output-file }}
+      run: |
+        echo "::group::Downloading red teaming artifacts for scan $SCAN_ID"
+        
+        # Check if authentication was successful
+        if [ -z "$ACCESS_TOKEN" ]; then
+          echo "::warning::Skipping artifact download due to authentication failure"
+          echo "retrieval-status=failed" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # First, get the S3 URL from the API
+        echo "Getting download URL from API..."
+        response=$(curl -s -w "\n%{http_code}" \
+          -X GET "$API_URL/red-teaming/v1/report-downloads/$SCAN_ID" \
+          -H "Authorization: Bearer $ACCESS_TOKEN")
+        
+        http_code=$(echo "$response" | tail -n 1)
+        json_response=$(echo "$response" | head -n -1)
+        
+        if [ "$http_code" != "200" ]; then
+          echo "::warning::Failed to get download URL. HTTP status: $http_code"
+          echo "Response: $json_response"
+          echo "retrieval-status=failed" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # Properly decode the JSON string (handles Unicode escapes like \u0026)
+        s3_url=$(echo "$json_response" | jq -r '.')
+        
+        # Save URLs for inspection
+        echo "$json_response" > /tmp/raw_response.txt
+        echo "$s3_url" > /tmp/decoded_url.txt
+        
+        # Check if we got a valid URL
+        if [ -z "$s3_url" ] || [ "$s3_url" == "null" ]; then
+          echo "::warning::No download URL returned from API"
+          echo "retrieval-status=failed" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        echo "Got S3 pre-signed URL, downloading artifact..."
+        # Show a sanitized version of the URL (without credentials)
+        sanitized_url=$(echo "$s3_url" | sed 's/\(.*\.zip\).*/\1.../')
+        echo "Downloading from: $sanitized_url"
+        
+        # Check URL format
+        echo "URL starts with: $(echo "$s3_url" | head -c 50)..."
+        echo "URL length: ${#s3_url}"
+        
+        # Validate URL format
+        if ! echo "$s3_url" | grep -q "^https://s3.*amazonaws.com/.*\.zip?"; then
+          echo "::warning::URL doesn't match expected S3 format"
+        fi
+        
+        # Download the file from S3 - IMPORTANT: Quote the URL to preserve special characters
+        echo "Attempting download..."
+        
+        # Method 1: Direct curl with proper quoting
+        # Use verbose curl for debugging but capture stderr
+        curl_stderr=$(mktemp)
+        if curl -f -s -S -L -o "$OUTPUT_FILE" --stderr "$curl_stderr" "$s3_url"; then
+          download_success=true
+        else
+          download_exit_code=$?
+          download_success=false
+          # Show curl error details
+          if [ -f "$curl_stderr" ] && [ -s "$curl_stderr" ]; then
+            echo "::warning::Curl error details: $(cat "$curl_stderr")"
+          fi
+          
+          # Try alternative approach with different curl options
+          echo "::warning::First attempt failed, trying alternative curl approach..."
+          if curl -L -o "$OUTPUT_FILE" --fail-with-body "$s3_url" 2>"$curl_stderr"; then
+            download_success=true
+            echo "Alternative curl approach succeeded"
+          else
+            # Try wget as a fallback
+            echo "::warning::Curl failed, trying wget as fallback..."
+            if command -v wget >/dev/null 2>&1; then
+              if wget -q -O "$OUTPUT_FILE" "$s3_url" 2>"$curl_stderr"; then
+                download_success=true
+                echo "wget succeeded"
+              else
+                echo "::warning::wget also failed: $(cat "$curl_stderr" 2>/dev/null || echo "unknown error")"
+              fi
+            else
+              echo "::warning::wget not available"
+            fi
+          fi
+        fi
+        rm -f "$curl_stderr"
+        
+        if [ "$download_success" = true ]; then
+          echo "Download completed successfully"
+        else
+          echo "::warning::Failed to download from S3. Curl exit code: $download_exit_code"
+          echo "::warning::This may be due to an invalid or expired URL"
+          rm -f "$OUTPUT_FILE"
+          echo "retrieval-status=failed" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # Verify the file exists and has content
+        if [ -f "$OUTPUT_FILE" ] && [ -s "$OUTPUT_FILE" ]; then
+          # Check if it starts with PK (ZIP signature)
+          if head -c 2 "$OUTPUT_FILE" | grep -q "PK"; then
+            echo "✅ Successfully downloaded artifacts ZIP"
+            echo "File size: $(ls -lh "$OUTPUT_FILE" | awk '{print $5}')"
+            echo "artifacts-file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
+            echo "retrieval-status=success" >> $GITHUB_OUTPUT
+            
+            # Try to list contents if unzip is available
+            if command -v unzip >/dev/null 2>&1; then
+              echo "ZIP contents:"
+              unzip -l "$OUTPUT_FILE" || echo "Could not list ZIP contents"
+            else
+              echo "ZIP file downloaded (unzip not available to list contents)"
+            fi
+          else
+            echo "::warning::Downloaded file does not appear to be a valid ZIP archive"
+            rm -f "$OUTPUT_FILE"
+            echo "retrieval-status=failed" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "::warning::Downloaded file is empty or does not exist"
+          rm -f "$OUTPUT_FILE"
+          echo "retrieval-status=failed" >> $GITHUB_OUTPUT
+        fi
+        
+        echo "::endgroup::"
+    
+    - name: Extract Artifacts
+      id: extract
+      if: inputs.extract-files == 'true' && steps.download.outputs.artifacts-file != ''
+      shell: bash
+      env:
+        ZIP_FILE: ${{ steps.download.outputs.artifacts-file }}
+      run: |
+        echo "::group::Extracting red teaming artifacts"
+        
+        # Check if unzip is available
+        if ! command -v unzip >/dev/null 2>&1; then
+          echo "::warning::unzip command not available, installing..."
+          # Try to install unzip based on the OS
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y unzip
+          elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y unzip
+          elif command -v apk >/dev/null 2>&1; then
+            sudo apk add unzip
+          else
+            echo "::warning::Could not install unzip. Skipping extraction."
+            echo "artifacts-dir=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+        fi
+        
+        # Create extraction directory
+        extract_dir="${ZIP_FILE%.zip}_extracted"
+        mkdir -p "$extract_dir"
+        
+        # Extract files
+        if unzip -q "$ZIP_FILE" -d "$extract_dir"; then
+          echo "✅ Extracted artifacts to: $extract_dir"
+          echo "artifacts-dir=$extract_dir" >> $GITHUB_OUTPUT
+          
+          # List extracted files
+          echo "Extracted files:"
+          find "$extract_dir" -type f -name "*.csv" 2>/dev/null | while read -r file; do
+            echo "  - $(basename "$file") ($(wc -l < "$file" 2>/dev/null || echo "?") lines)"
+          done
+        else
+          echo "::warning::Failed to extract ZIP file"
+          echo "artifacts-dir=" >> $GITHUB_OUTPUT
+        fi
+        
+        echo "::endgroup::" 

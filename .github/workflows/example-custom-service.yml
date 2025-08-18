@@ -1,0 +1,206 @@
+# Example: Red Teaming with Custom Service
+#
+# This example demonstrates how to use the custom service feature
+# to test your own containerized AI application.
+
+name: Example - Custom Service Red Teaming
+
+on:
+  workflow_dispatch:
+    inputs:
+      service-image:
+        description: 'Docker image for your service'
+        required: true
+        default: 'mycompany/ai-api:latest'
+      service-port:
+        description: 'Port your service listens on'
+        required: true
+        default: '8080'
+
+jobs:
+  test-custom-service:
+    name: Test Custom AI Service
+    uses: ./.github/workflows/ai-development-workflow.yml
+    with:
+      # Enable red teaming
+      enable-model-scanning: false
+      enable-basic-red-teaming: true
+      enable-red-teaming-with-aidr: true
+      
+      # Model configuration
+      model-name: "custom-ai-service"
+      
+      # Custom service configuration
+      service-docker-image: ${{ github.event.inputs.service-image }}
+      service-port: ${{ github.event.inputs.service-port }}
+      service-health-command: |
+        curl -f http://localhost:${{ github.event.inputs.service-port }}/health || \
+        curl -f http://localhost:${{ github.event.inputs.service-port }}/api/health || \
+        curl -f http://localhost:${{ github.event.inputs.service-port }}/v1/health || \
+        exit 1
+      
+      # Optional: Override the target URL (uncomment to use)
+      # target-url: "http://localhost:8080/api/v1/chat/completions"
+      
+      # Optional: Private registry authentication (uncomment if needed)
+      # service-registry: "myregistry.azurecr.io"
+      # service-registry-username: ${{ vars.REGISTRY_USERNAME }}
+      
+      # Optional: Custom AIDR port (default is 8000)
+      # aidr-port: "9000"
+      
+      # Environment variables for basic red teaming
+      service-env-vars: |
+        LOG_LEVEL=debug          # More verbose for basic testing
+        MAX_REQUESTS=1000
+        TIMEOUT=30
+        DEBUG_MODE=true
+        TRACE_REQUESTS=true
+      
+      # Different environment variables when running with AIDR
+      service-env-vars-aidr: |
+        LOG_LEVEL=info           # Less verbose with AIDR
+        MAX_REQUESTS=500         # Lower limits with proxy
+        TIMEOUT=20               # Shorter timeout with AIDR
+        DEBUG_MODE=false
+        TRACE_REQUESTS=false
+        PROXY_MODE=true          # Flag to detect proxy
+      
+      # Red teaming configuration
+      attack-tags: "llm-attacks,prompt-injection,jailbreak"
+      planned-attempts: "3"
+      
+      # AIDR custom configuration (optional)
+      aidr-env-vars: |
+        # Enable additional protections
+        HL_LLM_BLOCK_JAILBREAK=true
+        HL_LLM_BLOCK_HARMFUL_CONTENT=true
+        # Custom block message
+        HL_LLM_BLOCK_MESSAGE=This request violates our security policy.
+        HL_LLM_INCLUDE_BLOCK_MESSAGE_REASONS=true
+      
+      # HiddenLayer configuration
+      hiddenlayer-client-id: ${{ vars.HIDDENLAYER_CLIENT_ID }}
+      quay-username: ${{ vars.QUAY_USERNAME }}
+      hiddenlayer-api-url: ${{ vars.HIDDENLAYER_API_URL }}
+      hiddenlayer-auth-url: ${{ vars.HIDDENLAYER_AUTH_URL }}
+      hiddenlayer-console-url: ${{ vars.HIDDENLAYER_CONSOLE_URL }}
+      
+    secrets:
+      HIDDENLAYER_CLIENT_SECRET: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+      HL_LICENSE_AUTOMATED_RED_TEAMING: ${{ secrets.HL_LICENSE_AUTOMATED_RED_TEAMING }}
+      HL_LICENSE_AIDR: ${{ secrets.HL_LICENSE_AIDR }}
+
+  # Example of a more complex setup with environment variables from secrets
+  test-production-service:
+    name: Test Production Service
+    if: false  # Set to true to enable this example
+    uses: ./.github/workflows/automated-red-teaming.yml
+    with:
+      # Model configuration
+      model-name: "production-api"
+      
+      # Custom service with production configuration
+      service-docker-image: "mycompany/production-ai:v2.1.0"
+      service-port: "443"
+      service-health-command: "wget --no-check-certificate -q --spider https://localhost:443/api/v2/health || exit 1"
+      
+      # Override target URL to use HTTPS and custom API path
+      target-url: "https://localhost:443/api/v2/chat"
+      
+      service-env-vars: |
+        API_KEY=${{ secrets.PRODUCTION_API_KEY }}
+        DATABASE_URL=${{ secrets.PRODUCTION_DB_URL }}
+        REDIS_URL=redis://localhost:6379
+        TLS_ENABLED=true
+        TLS_CERT=/certs/server.crt
+        TLS_KEY=/certs/server.key
+        LOG_LEVEL=warn
+        ENVIRONMENT=testing
+      
+      # Test configuration
+      enable-basic-red-teaming: true
+      attack-tags: "owasp-llm-top-10"
+      planned-attempts: "5"
+      
+      # HiddenLayer configuration
+      hiddenlayer-client-id: ${{ vars.HIDDENLAYER_CLIENT_ID }}
+      quay-username: ${{ vars.QUAY_USERNAME }}
+      
+    secrets: inherit 
+
+  # Example with comprehensive secret usage
+  test-with-secrets:
+    name: Test Service with Secrets
+    uses: ./.github/workflows/ai-development-workflow.yml
+    with:
+      # Enable red teaming
+      enable-model-scanning: false
+      enable-basic-red-teaming: true
+      enable-red-teaming-with-aidr: true
+      
+      # Model configuration
+      model-name: "secure-api"
+      
+      # Custom service configuration
+      service-docker-image: "mycompany/secure-ai-api:latest"
+      service-port: "443"
+      service-health-command: "curl -k -f https://localhost:443/health || exit 1"
+      
+      # Basic mode - non-secret configuration
+      service-env-vars: |
+        # Feature flags
+        ENABLE_DEBUG=true
+        LOG_LEVEL=debug
+        MAX_CONNECTIONS=100
+        CACHE_TTL=300
+      
+      # AIDR mode - production configuration
+      service-env-vars-aidr: |
+        # Feature flags
+        ENABLE_DEBUG=false
+        LOG_LEVEL=error
+        RATE_LIMIT_ENABLED=true
+        MAX_CONNECTIONS=50
+        CACHE_TTL=3600
+        PROXY_MODE=true
+      
+      # AIDR configuration
+      aidr-env-vars: |
+        HL_LLM_BLOCK_JAILBREAK=true
+        HL_LLM_BLOCK_HARMFUL_CONTENT=true
+        HL_LLM_CONFIDENCE_THRESHOLD=0.7
+      
+      # HiddenLayer configuration
+      hiddenlayer-client-id: ${{ vars.HIDDENLAYER_CLIENT_ID }}
+      quay-username: ${{ vars.QUAY_USERNAME }}
+      
+    secrets:
+      # Required HiddenLayer secrets
+      HIDDENLAYER_CLIENT_SECRET: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+      HL_LICENSE_AUTOMATED_RED_TEAMING: ${{ secrets.HL_LICENSE_AUTOMATED_RED_TEAMING }}
+      HL_LICENSE_AIDR: ${{ secrets.HL_LICENSE_AIDR }}
+      
+      # Custom service secrets for basic mode (passed as JSON)
+      SERVICE_ENV_SECRETS: |
+        {
+          "API_KEY": "${{ secrets.DEV_API_KEY }}",
+          "API_SECRET": "${{ secrets.DEV_API_SECRET }}",
+          "DB_CONNECTION_STRING": "${{ secrets.DEV_DB_CONNECTION }}",
+          "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
+          "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}"
+        }
+      
+      # Different secrets for AIDR mode (optional)
+      SERVICE_ENV_SECRETS_AIDR: |
+        {
+          "API_KEY": "${{ secrets.PROD_API_KEY }}",
+          "API_SECRET": "${{ secrets.PROD_API_SECRET }}",
+          "DB_CONNECTION_STRING": "${{ secrets.PROD_DB_READONLY }}",
+          "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
+          "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
+          "TLS_CERT_B64": "${{ secrets.TLS_CERT_B64 }}",
+          "TLS_KEY_B64": "${{ secrets.TLS_KEY_B64 }}"
+        } 

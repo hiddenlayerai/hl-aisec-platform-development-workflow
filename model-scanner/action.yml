@@ -1,0 +1,108 @@
+name: 'HiddenLayer Model Scanner'
+description: 'Scans models using HiddenLayer Model Scanner'
+inputs:
+  scan-path:
+    description: 'Path to scan'
+    required: true
+  model-scanner-version:
+    description: 'Model Scanner version tag'
+    required: false
+    default: '25.5.1'
+  license:
+    description: 'HiddenLayer Model Scanner License'
+    required: true
+  exclude-patterns:
+    description: 'Comma-separated list of patterns to exclude'
+    required: false
+    default: '*.lock,*.metadata,*main*'
+  output-file:
+    description: 'Output file name for scan results'
+    required: false
+    default: 'scan_results.json'
+outputs:
+  scan-results:
+    description: 'Path to scan results file'
+    value: ${{ steps.scan.outputs.results-file }}
+  scan-id:
+    description: 'Scan ID from results'
+    value: ${{ steps.scan.outputs.scan-id }}
+  detections-found:
+    description: 'Whether detections were found'
+    value: ${{ steps.scan.outputs.detections-found }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate License
+      shell: bash
+      run: |
+        if [ -z "${{ inputs.license }}" ]; then
+          echo "::error::Model Scanner license is required"
+          exit 1
+        fi
+    
+    - name: Run Model Scanner
+      id: scan
+      shell: bash
+      env:
+        HL_LICENSE: ${{ inputs.license }}
+      run: |
+        echo "::group::Running Model Scanner"
+        
+        # Build the docker command with exclude patterns
+        docker_cmd="docker run --rm \
+          -e HL_LICENSE=$HL_LICENSE \
+          --entrypoint /modelscan/cli \
+          -v \"${{ inputs.scan-path }}:/scan\" \
+          quay.io/hiddenlayer/distro-cli-modelscanner:${{ inputs.model-scanner-version }} \
+          --input /scan"
+        
+        # Add exclude patterns
+        IFS=',' read -ra patterns <<< "${{ inputs.exclude-patterns }}"
+        for pattern in "${patterns[@]}"; do
+          pattern=$(echo "$pattern" | xargs)  # Trim whitespace
+          docker_cmd="$docker_cmd --exclude-pattern \"$pattern\""
+        done
+        
+        # Add output format
+        docker_cmd="$docker_cmd --output-format v3"
+        
+        # Execute the command
+        echo "Executing: $docker_cmd"
+        scan_results=$(eval "$docker_cmd")
+        
+        # Save results
+        echo "$scan_results" | jq -c . > "${{ inputs.output-file }}"
+        
+        # Extract scan ID
+        scan_id=$(echo "$scan_results" | jq -r '.scan_id')
+        echo "scan-id=$scan_id" >> $GITHUB_OUTPUT
+        echo "results-file=${{ inputs.output-file }}" >> $GITHUB_OUTPUT
+        
+        # Check for detections - using robust parsing
+        detections_count=0
+        
+        # Count detections in file_results
+        if echo "$scan_results" | jq -e '.file_results' >/dev/null 2>&1; then
+          detections_count=$(echo "$scan_results" | jq '[.file_results[]?.detections? | length] | add // 0')
+        fi
+        
+        # Also check if there's a detection_count field at the root level
+        if [ "$detections_count" -eq 0 ] && echo "$scan_results" | jq -e '.detection_count' >/dev/null 2>&1; then
+          detections_count=$(echo "$scan_results" | jq '.detection_count // 0')
+        fi
+        
+        if [ "$detections_count" -gt 0 ]; then
+          echo "detections-found=true" >> $GITHUB_OUTPUT
+          echo "::warning::Found $detections_count detections in scan"
+        else
+          echo "detections-found=false" >> $GITHUB_OUTPUT
+          echo "::notice::No detections found in scan"
+        fi
+        
+        echo "::endgroup::"
+        
+        # Display summary
+        echo "::group::Scan Summary"
+        echo "$scan_results" | jq '.scan_summary'
+        echo "::endgroup::" 

@@ -1,0 +1,309 @@
+name: 'Red Teaming Report'
+description: 'Retrieves and analyzes red teaming results from HiddenLayer'
+inputs:
+  scan-id:
+    description: 'Red teaming scan ID'
+    required: true
+  client-id:
+    description: 'HiddenLayer Client ID'
+    required: true
+  client-secret:
+    description: 'HiddenLayer Client Secret'
+    required: true
+  auth-url:
+    description: 'HiddenLayer Auth URL'
+    required: false
+    default: 'https://auth.hiddenlayer.ai'
+  api-url:
+    description: 'HiddenLayer API URL'
+    required: false
+    default: 'https://api.us.hiddenlayer.ai'
+  console-url:
+    description: 'HiddenLayer Console URL'
+    required: false
+    default: 'https://console.us.hiddenlayer.ai'
+  scan-type:
+    description: 'Type of scan (Basic or AIDR-Protected)'
+    required: false
+    default: 'Basic'
+  model-name:
+    description: 'Model name that was tested'
+    required: false
+    default: 'Unknown'
+  fail-on-findings:
+    description: 'Fail the action if vulnerabilities are found'
+    required: false
+    default: 'false'
+  output-format:
+    description: 'Report output format (summary, detailed, json)'
+    required: false
+    default: 'summary'
+outputs:
+  total-attacks:
+    description: 'Total number of attacks executed'
+    value: ${{ steps.analyze.outputs.total-attacks }}
+  total-findings:
+    description: 'Total number of findings'
+    value: ${{ steps.analyze.outputs.total-findings }}
+  critical-count:
+    description: 'Number of critical severity findings'
+    value: ${{ steps.analyze.outputs.critical }}
+  high-count:
+    description: 'Number of high severity findings'
+    value: ${{ steps.analyze.outputs.high }}
+  medium-count:
+    description: 'Number of medium severity findings'
+    value: ${{ steps.analyze.outputs.medium }}
+  low-count:
+    description: 'Number of low severity findings'
+    value: ${{ steps.analyze.outputs.low }}
+  report-url:
+    description: 'URL to view full report in HiddenLayer console'
+    value: ${{ steps.analyze.outputs.report-url }}
+  report-markdown:
+    description: 'Markdown formatted report content'
+    value: ${{ steps.generate.outputs.report-markdown }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install Dependencies
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests jq
+    
+    - name: Retrieve Scan Results
+      id: retrieve
+      shell: bash
+      run: |
+        echo "::group::Retrieving red teaming results"
+        
+        if [ -z "${{ inputs.scan-id }}" ]; then
+          echo "::error::No scan ID provided"
+          exit 1
+        fi
+        
+        # First authenticate to get access token
+        echo "Authenticating with HiddenLayer..."
+        auth_response=$(curl -s -w '\n%{http_code}' -X POST \
+          -u "${{ inputs.client-id }}:${{ inputs.client-secret }}" \
+          "${{ inputs.auth-url }}/oauth2/token?grant_type=client_credentials")
+        
+        auth_http_code=$(echo "$auth_response" | tail -n1)
+        auth_body=$(echo "$auth_response" | sed '$d')
+        
+        if [ "$auth_http_code" != "200" ]; then
+          echo "::error::Authentication failed. Status: $auth_http_code"
+          exit 1
+        fi
+        
+        # Extract access token
+        access_token=$(echo "$auth_body" | jq -r '.access_token')
+        
+        if [ -z "$access_token" ] || [ "$access_token" == "null" ]; then
+          echo "::error::Failed to extract access token from authentication response"
+          exit 1
+        fi
+        
+        echo "✅ Successfully authenticated"
+        
+        # Retrieve results
+        response=$(curl -s -w '\n%{http_code}' -X GET \
+          -H "Authorization: Bearer $access_token" \
+          "${{ inputs.api-url }}/red-teaming/v1/reports?scan_id=${{ inputs.scan-id }}")
+        
+        http_code=$(echo "$response" | tail -n1)
+        body=$(echo "$response" | sed '$d')
+        
+        if [ "$http_code" != "200" ]; then
+          echo "::error::Failed to retrieve scan results. Status: $http_code"
+          exit 1
+        fi
+        
+        # Save results
+        echo "$body" > scan_results.json
+        
+        # Check if results exist
+        items_count=$(echo "$body" | jq -r '.items | length')
+        if [ "$items_count" == "0" ]; then
+          echo "::warning::No results found for scan ID: ${{ inputs.scan-id }}"
+          echo "has-results=false" >> $GITHUB_OUTPUT
+        else
+          echo "has-results=true" >> $GITHUB_OUTPUT
+          echo "✅ Retrieved scan results successfully"
+        fi
+        
+        echo "::endgroup::"
+    
+    - name: Analyze Results
+      id: analyze
+      if: steps.retrieve.outputs.has-results == 'true'
+      shell: bash
+      run: |
+        echo "::group::Analyzing red teaming results"
+        
+        # Parse results
+        total_attacks=$(jq -r '.items[0].total_attacks // 0' scan_results.json)
+        low=$(jq -r '.items[0].low // 0' scan_results.json)
+        medium=$(jq -r '.items[0].medium // 0' scan_results.json)
+        high=$(jq -r '.items[0].high // 0' scan_results.json)
+        critical=$(jq -r '.items[0].critical // 0' scan_results.json)
+        categories_failed=$(jq -r '.items[0].categories_failed // [] | join(", ")' scan_results.json)
+        
+        total_findings=$((low + medium + high + critical))
+        
+        # Set outputs
+        echo "total-attacks=$total_attacks" >> $GITHUB_OUTPUT
+        echo "total-findings=$total_findings" >> $GITHUB_OUTPUT
+        echo "low=$low" >> $GITHUB_OUTPUT
+        echo "medium=$medium" >> $GITHUB_OUTPUT
+        echo "high=$high" >> $GITHUB_OUTPUT
+        echo "critical=$critical" >> $GITHUB_OUTPUT
+        echo "categories-failed=$categories_failed" >> $GITHUB_OUTPUT
+        echo "report-url=${{ inputs.console-url }}/automated-red-teaming?activeTab=reports&target_name=${{ github.repository }}" >> $GITHUB_OUTPUT
+        
+        # Display summary
+        echo "📊 Results Summary:"
+        echo "  Total Attacks: $total_attacks"
+        echo "  Total Findings: $total_findings"
+        echo "  Critical: $critical"
+        echo "  High: $high"
+        echo "  Medium: $medium"
+        echo "  Low: $low"
+        
+        if [ -n "$categories_failed" ] && [ "$categories_failed" != "null" ]; then
+          echo "  Failed Categories: $categories_failed"
+        fi
+        
+        echo "::endgroup::"
+    
+    - name: Generate Report
+      id: generate
+      if: steps.retrieve.outputs.has-results == 'true'
+      shell: bash
+      run: |
+        format="${{ inputs.output-format }}"
+        
+        case "$format" in
+          "json")
+            echo "::group::JSON Report"
+            jq '.items[0]' scan_results.json
+            echo "::endgroup::"
+            ;;
+          
+          "detailed")
+            echo "::group::Detailed Report"
+            python3 << 'EOF'
+        import json
+        
+        with open('scan_results.json', 'r') as f:
+            data = json.load(f)
+        
+        if data['items']:
+            result = data['items'][0]
+            
+            print(f"# Red Teaming Report: ${{ inputs.model-name }}")
+            print(f"\nScan ID: ${{ inputs.scan-id }}")
+            print(f"Scan Type: ${{ inputs.scan-type }}")
+            print(f"Total Attacks: {result.get('total_attacks', 0)}")
+            print("\n## Severity Distribution")
+            print(f"- Critical: {result.get('critical', 0)}")
+            print(f"- High: {result.get('high', 0)}")
+            print(f"- Medium: {result.get('medium', 0)}")
+            print(f"- Low: {result.get('low', 0)}")
+            
+            if result.get('categories_failed'):
+                print("\n## Failed Attack Categories")
+                for category in result['categories_failed']:
+                    print(f"- {category}")
+            
+            print(f"\n[View Full Report](${{ inputs.console-url }}/automated-red-teaming?activeTab=reports&target_name=${{ github.repository }})")
+        EOF
+            echo "::endgroup::"
+            ;;
+          
+          *)  # summary (default)
+            echo "## 🎯 Red Teaming Report" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Model:** ${{ inputs.model-name }}" >> $GITHUB_STEP_SUMMARY
+            echo "**Protection:** ${{ inputs.scan-type }}" >> $GITHUB_STEP_SUMMARY
+            echo "**Total Attacks:** ${{ steps.analyze.outputs.total-attacks }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            echo "### Severity Distribution" >> $GITHUB_STEP_SUMMARY
+            echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| 🟦 Low | ${{ steps.analyze.outputs.low }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🟨 Medium | ${{ steps.analyze.outputs.medium }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🟧 High | ${{ steps.analyze.outputs.high }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🟥 Critical | ${{ steps.analyze.outputs.critical }} |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            categories="${{ steps.analyze.outputs.categories-failed }}"
+            if [ -n "$categories" ] && [ "$categories" != "null" ] && [ "$categories" != "" ]; then
+              echo "### Failed Categories" >> $GITHUB_STEP_SUMMARY
+              echo "$categories" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            echo "[View Full Report](${{ steps.analyze.outputs.report-url }})" >> $GITHUB_STEP_SUMMARY
+            
+            # Also save to file for potential PR comment
+            {
+              echo "## 🎯 Red Teaming Report"
+              echo ""
+              echo "**Model:** ${{ inputs.model-name }}"
+              echo "**Protection:** ${{ inputs.scan-type }}"
+              echo "**Total Attacks:** ${{ steps.analyze.outputs.total-attacks }}"
+              echo ""
+              echo "### Severity Distribution"
+              echo "| Severity | Count |"
+              echo "|----------|-------|"
+              echo "| 🟦 Low | ${{ steps.analyze.outputs.low }} |"
+              echo "| 🟨 Medium | ${{ steps.analyze.outputs.medium }} |"
+              echo "| 🟧 High | ${{ steps.analyze.outputs.high }} |"
+              echo "| 🟥 Critical | ${{ steps.analyze.outputs.critical }} |"
+              echo ""
+              
+              if [ -n "$categories" ] && [ "$categories" != "null" ] && [ "$categories" != "" ]; then
+                echo "### Failed Categories"
+                echo "$categories"
+                echo ""
+              fi
+              
+              echo "[View Full Report](${{ steps.analyze.outputs.report-url }})"
+            } > red_teaming_report.md
+            
+            # Set output for PR comment
+            echo "report-markdown<<EOF" >> $GITHUB_OUTPUT
+            cat red_teaming_report.md >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            ;;
+        esac
+    
+    - name: Evaluate Findings
+      if: steps.retrieve.outputs.has-results == 'true'
+      shell: bash
+      run: |
+        total_findings="${{ steps.analyze.outputs.total-findings }}"
+        
+        if [ "$total_findings" -gt 0 ]; then
+          if [ "${{ inputs.scan-type }}" == "Basic" ]; then
+            echo "::warning::Red teaming found $total_findings vulnerabilities in unprotected model"
+          else
+            echo "::notice::Red teaming found $total_findings vulnerabilities (AIDR protection active)"
+          fi
+          
+          if [ "${{ inputs.fail-on-findings }}" == "true" ]; then
+            echo "::error::Red teaming found vulnerabilities and fail-on-findings is enabled"
+            exit 1
+          fi
+        else
+          echo "::notice::No vulnerabilities detected in red teaming scan"
+        fi 

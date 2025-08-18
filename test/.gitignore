@@ -1,0 +1,17 @@
+# Ignore any local modifications that might contain real credentials
+*.local.py
+*.env
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE files
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.bak 

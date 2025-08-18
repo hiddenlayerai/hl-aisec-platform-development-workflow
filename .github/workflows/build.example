@@ -1,0 +1,37 @@
+name: AI Security Check
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - '**.py'
+      - '**.pkl'
+      - '**.h5'
+      - '**.onnx'
+      - 'requirements.txt'
+
+jobs:
+  ai-security-check:
+    name: AI Security Check
+    uses: ./.github/workflows/ai-development-workflow.yml
+    with:
+      runs-on: github-runner-scale-set-large
+      enable-model-scanning: true
+      enable-basic-red-teaming: false
+      enable-red-teaming-with-aidr: false  # Uncomment to also test with AIDR protection
+      enforce-scan-detections: "true"  # Add this to enable the .hiddenlayer ignore checking
+      model-name: "phi4-mini"
+      attack-tags: "quick-start"
+      hiddenlayer-client-id: ${{ vars.HIDDENLAYER_CLIENT_ID }}
+      quay-username: ${{ vars.QUAY_USERNAME }}
+      hiddenlayer-api-url: ${{ vars.HIDDENLAYER_API_URL }}
+      hiddenlayer-auth-url: ${{ vars.HIDDENLAYER_AUTH_URL }}
+      hiddenlayer-console-url: ${{ vars.HIDDENLAYER_CONSOLE_URL }}
+      
+    secrets:
+      HIDDENLAYER_CLIENT_SECRET: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+      HL_LICENSE_MODELSCANNER: ${{ secrets.HL_LICENSE_MODELSCANNER }}
+      HL_LICENSE_AUTOMATED_RED_TEAMING: ${{ secrets.HL_LICENSE_AUTOMATED_RED_TEAMING }}
+      HL_LICENSE_AIDR: ${{ secrets.HL_LICENSE_AIDR }}
+

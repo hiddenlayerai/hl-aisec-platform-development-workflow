@@ -1,0 +1,120 @@
+name: 'HiddenLayer Authentication'
+description: 'Authenticates with HiddenLayer API and returns access token'
+inputs:
+  client-id:
+    description: 'HiddenLayer Client ID'
+    required: true
+  client-secret:
+    description: 'HiddenLayer Client Secret'
+    required: true
+  auth-url:
+    description: 'HiddenLayer Auth URL'
+    required: false
+    default: 'https://auth.hiddenlayer.ai'
+outputs:
+  access-token:
+    description: 'HiddenLayer Access Token (base64 encoded)'
+    value: ${{ steps.authenticate.outputs.access-token }}
+  decoded-token:
+    description: 'HiddenLayer Access Token (decoded)'
+    value: ${{ steps.authenticate.outputs.decoded-token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate Inputs
+      shell: bash
+      run: |
+        if [ -z "${{ inputs.client-id }}" ] || [ -z "${{ inputs.client-secret }}" ]; then
+          echo "::error::HiddenLayer Client ID and Client Secret are required"
+          exit 1
+        fi
+        
+        # Validate URL format
+        if ! [[ "${{ inputs.auth-url }}" =~ ^https?:// ]]; then
+          echo "::error::Invalid auth URL format. Must start with http:// or https://"
+          exit 1
+        fi
+    
+    - name: Authenticate with HiddenLayer
+      id: authenticate
+      shell: bash
+      run: |
+        echo "::group::Authenticating with HiddenLayer"
+        
+        AUTH_URL="${{ inputs.auth-url }}"
+        echo "::notice::Authenticating with: $AUTH_URL"
+        
+        # Validate we have credentials
+        if [ -z "${{ inputs.client-id }}" ]; then
+          echo "::error::Client ID is empty!"
+          exit 1
+        fi
+        
+        if [ -z "${{ inputs.client-secret }}" ]; then
+          echo "::error::Client secret is empty!"
+          exit 1
+        fi
+        
+        # Make authentication request
+        response=$(curl -s -w '\n%{http_code}' \
+          -u "${{ inputs.client-id }}:${{ inputs.client-secret }}" \
+          -X POST \
+          "$AUTH_URL/oauth2/token?grant_type=client_credentials")
+        
+        # Extract HTTP status code and response body
+        http_code=$(echo "$response" | tail -n1)
+        body=$(echo "$response" | sed '$d')
+        
+        # Check for successful response
+        if [ "$http_code" != "200" ]; then
+          echo "::error::Authentication failed with status code: $http_code"
+          
+          # Check for common issues
+          if [ "$http_code" == "401" ]; then
+            echo "::error::401 Unauthorized - Check your client ID and secret"
+          elif [ "$http_code" == "404" ]; then
+            echo "::error::404 Not Found - Check the auth URL: $AUTH_URL"
+          fi
+          
+          exit 1
+        fi
+        
+        # Extract access token
+        access_token=$(echo "$body" | jq -r '.access_token')
+        
+        if [ -z "$access_token" ] || [ "$access_token" == "null" ]; then
+          echo "::error::Failed to extract access token from response"
+          exit 1
+        fi
+        
+        echo "::notice::Successfully authenticated with HiddenLayer"
+        
+        # Base64 encode the token (double encoded for backward compatibility)
+        # Ensure no line breaks are introduced (GitHub output values must be single-line)
+        if base64 --help 2>&1 | grep -q "-w"; then
+          # GNU coreutils base64 supports -w (wrap width)
+          encoded_token=$(printf '%s' "$access_token" | base64 -w0 | base64 -w0)
+        else
+          # Fallback for BSD/macOS base64 (no -w flag). Remove newlines manually.
+          encoded_token=$(printf '%s' "$access_token" | base64 | tr -d '\n' | base64 | tr -d '\n')
+        fi
+        
+        # Mask the token in logs
+        echo "::add-mask::$access_token"
+        echo "::add-mask::$encoded_token"
+        
+        # Set outputs
+        echo "access-token=$encoded_token" >> $GITHUB_OUTPUT
+        echo "decoded-token=$access_token" >> $GITHUB_OUTPUT
+        
+        # Verify outputs were written
+        if [ -f "$GITHUB_OUTPUT" ]; then
+          if ! grep -q "^access-token=" "$GITHUB_OUTPUT"; then
+            echo "::error::access-token line NOT found in output file!"
+          fi
+        else
+          echo "::error::GITHUB_OUTPUT file does not exist!"
+        fi
+        
+        echo "::endgroup::" 

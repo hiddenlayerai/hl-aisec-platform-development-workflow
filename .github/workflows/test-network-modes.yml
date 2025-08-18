@@ -1,0 +1,145 @@
+name: Test Network Modes
+
+on:
+  workflow_dispatch:
+    inputs:
+      network-mode:
+        description: 'Network mode to test'
+        required: true
+        type: choice
+        options:
+          - bridge
+          - host
+        default: bridge
+
+jobs:
+  test-basic:
+    name: Test Basic Red Teaming - ${{ github.event.inputs.network-mode }} mode
+    uses: ./.github/workflows/automated-red-teaming.yml
+    with:
+      # Model configuration
+      model-name: 'phi4-mini'
+      model-provider: 'ollama'
+      
+      # Network configuration
+      network-mode: ${{ github.event.inputs.network-mode }}
+      
+      # Enable basic red teaming
+      enable-basic-red-teaming: true
+      enable-red-teaming-with-aidr: false
+      
+      # Attack configuration
+      attack-tags: 'quick-start'
+      planned-attempts: '1'
+      
+      # HiddenLayer configuration
+      hiddenlayer-client-id: ${{ vars.HIDDENLAYER_CLIENT_ID }}
+      hiddenlayer-api-url: ${{ vars.HIDDENLAYER_API_URL }}
+      hiddenlayer-auth-url: ${{ vars.HIDDENLAYER_AUTH_URL }}
+      hiddenlayer-console-url: ${{ vars.HIDDENLAYER_CONSOLE_URL }}
+      quay-username: ${{ vars.QUAY_USERNAME }}
+    
+    secrets: inherit
+
+  test-aidr:
+    name: Test AIDR Red Teaming - ${{ github.event.inputs.network-mode }} mode
+    needs: test-basic
+    if: success()
+    uses: ./.github/workflows/automated-red-teaming.yml
+    with:
+      # Model configuration
+      model-name: 'phi4-mini'
+      model-provider: 'ollama'
+      
+      # Network configuration
+      network-mode: ${{ github.event.inputs.network-mode }}
+      
+      # Enable AIDR red teaming
+      enable-basic-red-teaming: false
+      enable-red-teaming-with-aidr: true
+      
+      # Attack configuration
+      attack-tags: 'quick-start'
+      planned-attempts: '1'
+      
+      # HiddenLayer configuration
+      hiddenlayer-client-id: ${{ vars.HIDDENLAYER_CLIENT_ID }}
+      hiddenlayer-api-url: ${{ vars.HIDDENLAYER_API_URL }}
+      hiddenlayer-auth-url: ${{ vars.HIDDENLAYER_AUTH_URL }}
+      hiddenlayer-console-url: ${{ vars.HIDDENLAYER_CONSOLE_URL }}
+      quay-username: ${{ vars.QUAY_USERNAME }}
+    
+    secrets: inherit
+
+  test-custom-service:
+    name: Test Custom Service - ${{ github.event.inputs.network-mode }} mode
+    needs: test-aidr
+    if: success()
+    uses: ./.github/workflows/automated-red-teaming.yml
+    with:
+      # Model configuration
+      model-name: 'echo-service'
+      model-provider: 'custom'
+      
+      # Network configuration
+      network-mode: ${{ github.event.inputs.network-mode }}
+      
+      # Custom service configuration (simple echo service for testing)
+      service-docker-image: 'hashicorp/http-echo:latest'
+      service-port: '5678'
+      service-health-command: 'curl -f http://localhost:5678 || exit 1'
+      
+      # Override target URL to use the echo service
+      target-url: 'http://localhost:5678'
+      
+      # Enable both modes
+      enable-basic-red-teaming: true
+      enable-red-teaming-with-aidr: true
+      
+      # Attack configuration
+      attack-tags: 'quick-start'
+      planned-attempts: '1'
+      
+      # HiddenLayer configuration
+      hiddenlayer-client-id: ${{ vars.HIDDENLAYER_CLIENT_ID }}
+      hiddenlayer-api-url: ${{ vars.HIDDENLAYER_API_URL }}
+      hiddenlayer-auth-url: ${{ vars.HIDDENLAYER_AUTH_URL }}
+      hiddenlayer-console-url: ${{ vars.HIDDENLAYER_CONSOLE_URL }}
+      quay-username: ${{ vars.QUAY_USERNAME }}
+    
+    secrets: inherit
+
+  summary:
+    name: Network Mode Test Summary
+    runs-on: ubuntu-latest
+    needs: [test-basic, test-aidr, test-custom-service]
+    if: always()
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "## 🧪 Network Mode Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Network Mode:** ${{ github.event.inputs.network-mode }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | Status | Details |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Basic Red Teaming | ${{ needs.test-basic.result == 'success' && '✅ Passed' || '❌ Failed' }} | Ollama with basic red teaming |" >> $GITHUB_STEP_SUMMARY
+          echo "| AIDR Red Teaming | ${{ needs.test-aidr.result == 'success' && '✅ Passed' || '❌ Failed' }} | Ollama with AIDR protection |" >> $GITHUB_STEP_SUMMARY
+          echo "| Custom Service | ${{ needs.test-custom-service.result == 'success' && '✅ Passed' || '❌ Failed' }} | Echo service with both modes |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ github.event.inputs.network-mode }}" == "bridge" ]; then
+            echo "### Network Mode: Bridge 🌉" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Secure container isolation" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Explicit port mappings" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Service name resolution" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ No host network access" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### Network Mode: Host 🖥️" >> $GITHUB_STEP_SUMMARY
+            echo "- ⚠️ Shared host network" >> $GITHUB_STEP_SUMMARY
+            echo "- ⚠️ Direct port binding" >> $GITHUB_STEP_SUMMARY
+            echo "- ⚠️ Localhost communication" >> $GITHUB_STEP_SUMMARY
+            echo "- ⚠️ Full host network access" >> $GITHUB_STEP_SUMMARY
+          fi 
