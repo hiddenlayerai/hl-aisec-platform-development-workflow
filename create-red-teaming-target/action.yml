@@ -35,7 +35,7 @@ runs:
   steps:
     - name: Authenticate with HiddenLayer
       id: auth
-      uses: hiddenlayerai/hl-aisec-platform-development-workflow/hiddenlayer-auth@v2
+      uses: hiddenlayerai/hl-aisec-platform-development-workflow/hiddenlayer-auth@v1
       with:
         client-id: ${{ inputs.client-id }}
         client-secret: ${{ inputs.client-secret }}

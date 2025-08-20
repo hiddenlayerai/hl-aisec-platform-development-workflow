@@ -142,7 +142,7 @@ on:
 jobs:
   ai-security:
     name: Full AI Security Check
-    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/ai-development-workflow.yml@v2
+    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/ai-development-workflow.yml@v1
     with:
       # Runner configuration
       runs-on: ubuntu-latest  # or use your own runner
@@ -197,7 +197,7 @@ on:
 jobs:
   security-scan:
     name: Model Security Scan
-    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/ai-development-workflow.yml@v2
+    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/ai-development-workflow.yml@v1
     with:
       enable-model-scanning: true
       enable-basic-red-teaming: false
@@ -228,7 +228,7 @@ on:
 jobs:
   red-team:
     name: Red Team Testing
-    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/ai-development-workflow.yml@v2
+    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/ai-development-workflow.yml@v1
     with:
       enable-model-scanning: false
       enable-basic-red-teaming: true

@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Validate OpenAI Endpoint
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/validate-openai-compatible-endpoint@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/validate-openai-compatible-endpoint@v1
         with:
           target-url: 'http://localhost:8000/v1/chat/completions'
           model-name: 'phi4-mini'
@@ -46,7 +46,7 @@ jobs:
 
 ```yaml
 - name: Validate Endpoint
-  uses: hiddenlayerai/hl-aisec-platform-development-workflow/validate-openai-compatible-endpoint@v2
+  uses: hiddenlayerai/hl-aisec-platform-development-workflow/validate-openai-compatible-endpoint@v1
   with:
     target-url: 'http://my-service:8080/v1/chat/completions'
     model-name: 'custom-model'
@@ -56,7 +56,7 @@ jobs:
 
 ```yaml
 - name: Validate with Security Tests
-  uses: hiddenlayerai/hl-aisec-platform-development-workflow/validate-openai-compatible-endpoint@v2
+  uses: hiddenlayerai/hl-aisec-platform-development-workflow/validate-openai-compatible-endpoint@v1
   with:
     target-url: 'http://localhost:8000/v1/chat/completions'
     model-name: 'protected-model'
@@ -67,12 +67,12 @@ jobs:
 
 ```yaml
 - name: Setup Ollama
-  uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-ollama@v2
+  uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-ollama@v1
   with:
     model-name: 'llama3.2'
 
 - name: Validate Ollama Endpoint
-  uses: hiddenlayerai/hl-aisec-platform-development-workflow/validate-openai-compatible-endpoint@v2
+  uses: hiddenlayerai/hl-aisec-platform-development-workflow/validate-openai-compatible-endpoint@v1
   with:
     target-url: 'http://localhost:11434/v1/chat/completions'
     model-name: 'llama3.2'
@@ -82,7 +82,7 @@ jobs:
 
 ```yaml
 - name: Validate AIDR Service
-  uses: hiddenlayerai/hl-aisec-platform-development-workflow/validate-openai-compatible-endpoint@v2
+  uses: hiddenlayerai/hl-aisec-platform-development-workflow/validate-openai-compatible-endpoint@v1
   with:
     target-url: 'http://localhost:9000/v1/chat/completions'
     model-name: 'protected-model'

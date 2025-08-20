@@ -358,7 +358,7 @@ jobs:
       
       - name: Create Comprehensive PR Comment
         if: github.event_name == 'pull_request'
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/pr-comment@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/pr-comment@v1
         with:
           comment-identifier: 'hiddenlayer-ai-security-comprehensive'
           comment-body: |

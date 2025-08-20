@@ -252,14 +252,14 @@ jobs:
           lfs: true
       
       - name: Login to Container Registry
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/docker-login@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/docker-login@v1
         with:
           quay-username: ${{ inputs.quay-username }}
           quay-token: ${{ secrets.QUAY_TOKEN }}
       
       - name: Scan repository
         id: scan
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/model-scanner@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/model-scanner@v1
         with:
           scan-path: ${{ github.workspace }}
           model-scanner-version: ${{ inputs.model-scanner-version }}
@@ -295,7 +295,7 @@ jobs:
       - name: Submit scan results
         id: submit
         if: steps.check-creds.outputs.should-submit == 'true'
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/submit-scan-results@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/submit-scan-results@v1
         with:
           scan-results-file: repo_scan_results.json
           client-id: ${{ inputs.hiddenlayer-client-id }}
@@ -310,7 +310,7 @@ jobs:
       - name: Retrieve SARIF Results
         id: sarif
         if: steps.check-creds.outputs.should-submit == 'true' && steps.submit.outputs.scan-id != ''
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-sarif-results@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-sarif-results@v1
         with:
           scan-id: ${{ steps.submit.outputs.scan-id }}
           client-id: ${{ inputs.hiddenlayer-client-id }}
@@ -322,7 +322,7 @@ jobs:
       - name: Retrieve AIBOM Results
         id: aibom
         if: steps.check-creds.outputs.should-submit == 'true' && steps.submit.outputs.scan-id != ''
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-aibom-results@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-aibom-results@v1
         with:
           scan-id: ${{ steps.submit.outputs.scan-id }}
           client-id: ${{ inputs.hiddenlayer-client-id }}
@@ -367,7 +367,7 @@ jobs:
       - name: Check HiddenLayer ignores
         id: check-ignores
         if: inputs.enforce-scan-detections == 'true' && steps.scan.outputs.detections-found == 'true'
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/check-hiddenlayer-ignores@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/check-hiddenlayer-ignores@v1
         with:
           scan-results-file: repo_scan_results.json
           hiddenlayer-file: .hiddenlayer
@@ -422,7 +422,7 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Setup Python
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-python@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-python@v1
       
       - name: Download HuggingFace model
         id: download
@@ -478,14 +478,14 @@ jobs:
           echo "::endgroup::"
       
       - name: Login to Container Registry
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/docker-login@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/docker-login@v1
         with:
           quay-username: ${{ inputs.quay-username }}
           quay-token: ${{ secrets.QUAY_TOKEN }}
       
       - name: Scan HuggingFace model
         id: scan
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/model-scanner@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/model-scanner@v1
         with:
           scan-path: ${{ steps.download.outputs.model-dir }}
           model-scanner-version: ${{ inputs.model-scanner-version }}
@@ -495,7 +495,7 @@ jobs:
       - name: Submit scan results
         id: submit
         if: steps.check-creds.outputs.should-submit == 'true'
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/submit-scan-results@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/submit-scan-results@v1
         with:
           scan-results-file: hf_scan_results_${{ strategy.job-index }}.json
           client-id: ${{ inputs.hiddenlayer-client-id }}
@@ -510,7 +510,7 @@ jobs:
       - name: Retrieve SARIF Results
         id: sarif
         if: steps.check-creds.outputs.should-submit == 'true' && steps.submit.outputs.scan-id != ''
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-sarif-results@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-sarif-results@v1
         with:
           scan-id: ${{ steps.submit.outputs.scan-id }}
           client-id: ${{ inputs.hiddenlayer-client-id }}
@@ -522,7 +522,7 @@ jobs:
       - name: Retrieve AIBOM Results
         id: aibom
         if: steps.check-creds.outputs.should-submit == 'true' && steps.submit.outputs.scan-id != ''
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-aibom-results@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-aibom-results@v1
         with:
           scan-id: ${{ steps.submit.outputs.scan-id }}
           client-id: ${{ inputs.hiddenlayer-client-id }}
@@ -602,7 +602,7 @@ jobs:
       - name: Check HiddenLayer ignores
         id: check-ignores
         if: inputs.enforce-scan-detections == 'true' && steps.scan.outputs.detections-found == 'true'
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/check-hiddenlayer-ignores@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/check-hiddenlayer-ignores@v1
         with:
           scan-results-file: hf_scan_results_${{ strategy.job-index }}.json
           hiddenlayer-file: ${{ github.workspace }}/.hiddenlayer
@@ -692,7 +692,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       
       - name: Setup Python
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-python@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-python@v1
       
       - name: Create consolidated scan results
         id: consolidate
@@ -873,7 +873,7 @@ jobs:
       
       - name: Create PR Comment
         if: steps.generate-summary.outputs.pr-comment-needed == 'true' && inputs.create-pr-comment == 'true'
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/pr-comment@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/pr-comment@v1
         with:
           comment-identifier: 'hiddenlayer-model-scanner-summary'
           comment-body: |

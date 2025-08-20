@@ -17,7 +17,7 @@ on:
 
 jobs:
   ai-security:
-    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/ai-development-workflow.yml@v2
+    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/ai-development-workflow.yml@v1
     with:
       enable-model-scanning: true
       hiddenlayer-client-id: ${{ vars.HIDDENLAYER_CLIENT_ID }}
@@ -67,7 +67,7 @@ on:
 
 jobs:
   scan:
-    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/model-scanner.yml@v2
+    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/model-scanner.yml@v1
     with:
       enforce-scan-detections: "true"  # Fail if vulnerabilities found
       hiddenlayer-client-id: ${{ vars.HIDDENLAYER_CLIENT_ID }}
@@ -95,7 +95,7 @@ on:
 
 jobs:
   red-team:
-    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/automated-red-teaming.yml@v2
+    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/automated-red-teaming.yml@v1
     with:
       model-name: ${{ inputs.model-name }}
       model-provider: "openai"  # Options: ollama, openai, custom
@@ -122,7 +122,7 @@ on:
 
 jobs:
   protected-red-team:
-    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/automated-red-teaming.yml@v2
+    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/automated-red-teaming.yml@v1
     with:
       model-name: "llama2"
       model-provider: "ollama"
@@ -151,7 +151,7 @@ on:
 
 jobs:
   ai-security:
-    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/ai-development-workflow.yml@v2
+    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/ai-development-workflow.yml@v1
     with:
       # Enable features
       enable-model-scanning: true
@@ -218,7 +218,7 @@ For testing models hosted on custom infrastructure:
 ```yaml
 jobs:
   test-custom-model:
-    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/automated-red-teaming.yml@v2
+    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/automated-red-teaming.yml@v1
     with:
       model-name: "custom-model"
       model-provider: "custom"
@@ -236,7 +236,7 @@ Test your own containerized AI applications without using Ollama:
 ```yaml
 jobs:
   test-docker-service:
-    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/automated-red-teaming.yml@v2
+    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/automated-red-teaming.yml@v1
     with:
       # Model configuration
       model-name: "my-custom-api"
@@ -321,7 +321,7 @@ Red team OpenAI models (GPT-3.5, GPT-4) with AIDR protection:
 ```yaml
 jobs:
   test-openai:
-    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/automated-red-teaming.yml@v2
+    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/automated-red-teaming.yml@v1
     with:
       model-name: "gpt-3.5-turbo"
       model-provider: "openai"
@@ -348,7 +348,7 @@ Specify custom runners for your workflows:
 ```yaml
 jobs:
   security:
-    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/ai-development-workflow.yml@v2
+    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/ai-development-workflow.yml@v1
     with:
       runs-on: "self-hosted-gpu-runner"  # Your custom runner
       enable-model-scanning: true
@@ -377,7 +377,7 @@ All workflows provide outputs that can be used in subsequent jobs:
 ```yaml
 jobs:
   security:
-    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/model-scanner.yml@v2
+    uses: hiddenlayerai/hl-aisec-platform-development-workflow/.github/workflows/model-scanner.yml@v1
     # ... configuration ...
   
   process-results:

@@ -391,13 +391,13 @@ jobs:
       
       - name: Setup Ollama Model
         if: needs.prepare-service.outputs.use-custom-service != 'true' && inputs.model-provider == 'ollama'
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-ollama@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-ollama@v1
         with:
           model-name: ${{ inputs.model-name }}
           ollama-endpoint: http://localhost:8000
       
       - name: Login to Container Registry
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/docker-login@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/docker-login@v1
         with:
           quay-username: ${{ inputs.quay-username }}
           quay-token: ${{ secrets.QUAY_TOKEN }}
@@ -421,7 +421,7 @@ jobs:
           fi
       
       - name: Create Red Teaming Target
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/create-red-teaming-target@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/create-red-teaming-target@v1
         with:
           target-name: ${{ github.repository }}
           target-url: ${{ steps.determine-url.outputs.target-url }}
@@ -432,7 +432,7 @@ jobs:
       
       - name: Run Automated Red Teaming
         id: run-red-teaming
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/run-red-teaming@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/run-red-teaming@v1
         with:
           target-url: ${{ steps.determine-url.outputs.target-url }}
           model-name: ${{ inputs.model-name }}
@@ -448,7 +448,7 @@ jobs:
       - name: Retrieve Red Teaming Artifacts
         id: retrieve-artifacts
         if: steps.run-red-teaming.outputs.scan-id != ''
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-red-teaming-artifacts@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-red-teaming-artifacts@v1
         with:
           scan-id: ${{ steps.run-red-teaming.outputs.scan-id }}
           client-id: ${{ inputs.hiddenlayer-client-id }}
@@ -559,7 +559,7 @@ jobs:
           echo "::endgroup::"
       
       - name: Login to Container Registry
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/docker-login@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/docker-login@v1
         with:
           quay-username: ${{ inputs.quay-username }}
           quay-token: ${{ secrets.QUAY_TOKEN }}
@@ -761,7 +761,7 @@ jobs:
       
       - name: Setup Ollama Model
         if: needs.prepare-service.outputs.use-custom-service != 'true' && inputs.model-provider == 'ollama'
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-ollama@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-ollama@v1
         with:
           model-name: ${{ inputs.model-name }}
           ollama-endpoint: http://localhost:8001
@@ -906,13 +906,13 @@ jobs:
           fi
       
       # - name: Validate Target Endpoint
-      #   uses: hiddenlayerai/hl-aisec-platform-development-workflow/validate-openai-compatible-endpoint@v2
+      #   uses: hiddenlayerai/hl-aisec-platform-development-workflow/validate-openai-compatible-endpoint@v1
       #   with:
       #     target-url: ${{ steps.determine-url.outputs.target-url }}
       #     model-name: ${{ github.repository }}
       
       - name: Create Red Teaming Target
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/create-red-teaming-target@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/create-red-teaming-target@v1
         with:
           target-name: ${{ github.repository }}
           target-url: ${{ steps.determine-url.outputs.target-url }}
@@ -923,7 +923,7 @@ jobs:
       
       - name: Run Automated Red Teaming with AIDR
         id: run-red-teaming
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/run-red-teaming@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/run-red-teaming@v1
         with:
           target-url: ${{ steps.determine-url.outputs.target-url }}
           model-name: ${{ github.repository }}
@@ -939,7 +939,7 @@ jobs:
       - name: Retrieve Red Teaming Artifacts
         id: retrieve-artifacts
         if: steps.run-red-teaming.outputs.scan-id != ''
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-red-teaming-artifacts@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-red-teaming-artifacts@v1
         with:
           scan-id: ${{ steps.run-red-teaming.outputs.scan-id }}
           client-id: ${{ inputs.hiddenlayer-client-id }}
@@ -1022,7 +1022,7 @@ jobs:
       - name: Generate Basic Report
         id: report-basic
         if: needs.red-teaming-basic.result != 'skipped'
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/red-teaming-report@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/red-teaming-report@v1
         with:
           scan-id: ${{ needs.red-teaming-basic.outputs.scan-id }}
           client-id: ${{ inputs.hiddenlayer-client-id }}
@@ -1037,7 +1037,7 @@ jobs:
       - name: Generate AIDR Report
         id: report-aidr
         if: needs.red-teaming-aidr.result != 'skipped'
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/red-teaming-report@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/red-teaming-report@v1
         with:
           scan-id: ${{ needs.red-teaming-aidr.outputs.scan-id }}
           client-id: ${{ inputs.hiddenlayer-client-id }}
@@ -1181,7 +1181,7 @@ jobs:
       
       - name: Create PR Comment
         if: github.event_name == 'pull_request' && inputs.create-pr-comment != 'false'
-        uses: hiddenlayerai/hl-aisec-platform-development-workflow/pr-comment@v2
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/pr-comment@v1
         with:
           comment-identifier: 'hiddenlayer-red-teaming-report'
           comment-body: |

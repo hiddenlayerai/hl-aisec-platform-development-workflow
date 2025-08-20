@@ -97,7 +97,7 @@ This branch implements comprehensive custom service support for automated red te
 
 ## Ready for v2 Release
 This branch contains all the features needed for the v2 release. The main tasks remaining are:
-1. Update all `@v1` references to `@v2`
+1. Update all `@v1` references to `@v1`
 2. Remove development/debug configurations
 3. Complete testing in various environments
 4. Create final release documentation 
