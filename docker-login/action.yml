@@ -1,0 +1,19 @@
+name: 'Docker Login to Quay'
+description: 'Logs into Quay.io Docker registry'
+inputs:
+  quay-username:
+    description: 'Quay.io username'
+    required: true
+  quay-token:
+    description: 'Quay.io token'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Login to Quay
+      uses: docker/login-action@v3
+      with:
+        registry: quay.io
+        username: ${{ inputs.quay-username }}
+        password: ${{ inputs.quay-token }} 

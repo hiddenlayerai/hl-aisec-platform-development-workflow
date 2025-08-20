@@ -1,0 +1,90 @@
+name: Example - Network Mode Configuration
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # Example 1: Using secure bridge mode (default)
+  bridge-mode-example:
+    name: Red Team with Bridge Networking
+    uses: ./.github/workflows/automated-red-teaming.yml
+    with:
+      # Model configuration
+      model-name: 'phi4-mini'
+      model-provider: 'ollama'
+      
+      # Network configuration - Bridge mode is the default
+      # network-mode: 'bridge'  # Optional, this is the default
+      
+      # Custom service example
+      service-docker-image: 'myorg/ai-service:latest'
+      service-port: '8080'
+      service-env-vars: |
+        LOG_LEVEL=info
+        PORT=8080
+      
+      # Enable testing
+      enable-basic-red-teaming: true
+      enable-red-teaming-with-aidr: true
+      
+      # HiddenLayer configuration
+      hiddenlayer-client-id: ${{ vars.HIDDENLAYER_CLIENT_ID }}
+      quay-username: ${{ vars.QUAY_USERNAME }}
+    
+    secrets: inherit
+
+  # Example 2: Using host mode for legacy compatibility
+  host-mode-example:
+    name: Red Team with Host Networking
+    uses: ./.github/workflows/automated-red-teaming.yml
+    with:
+      # Model configuration
+      model-name: 'phi4-mini'
+      model-provider: 'ollama'
+      
+      # Network configuration - Explicitly use host mode
+      network-mode: 'host'
+      
+      # Custom service example
+      service-docker-image: 'myorg/legacy-service:v1'
+      service-port: '3000'
+      service-env-vars: |
+        # Legacy service that requires host networking
+        USE_HOST_NETWORK=true
+        BIND_ADDRESS=0.0.0.0
+      
+      # Enable testing
+      enable-basic-red-teaming: true
+      enable-red-teaming-with-aidr: true
+      
+      # HiddenLayer configuration
+      hiddenlayer-client-id: ${{ vars.HIDDENLAYER_CLIENT_ID }}
+      quay-username: ${{ vars.QUAY_USERNAME }}
+    
+    secrets: inherit
+
+  # Example 3: Conditional network mode based on environment
+  conditional-network:
+    name: Environment-Based Network Mode
+    uses: ./.github/workflows/automated-red-teaming.yml
+    with:
+      # Model configuration
+      model-name: 'adaptive-model'
+      
+      # Choose network mode based on environment
+      # Use bridge for cloud runners, host for self-hosted
+      network-mode: ${{ contains(github.event.repository.name, 'production') && 'bridge' || 'host' }}
+      
+      # Service configuration
+      service-docker-image: 'myorg/adaptive-service:latest'
+      service-port: '8080'
+      
+      # Enable testing
+      enable-basic-red-teaming: true
+      enable-red-teaming-with-aidr: true
+      
+      # HiddenLayer configuration
+      hiddenlayer-client-id: ${{ vars.HIDDENLAYER_CLIENT_ID }}
+      quay-username: ${{ vars.QUAY_USERNAME }}
+    
+    secrets: inherit

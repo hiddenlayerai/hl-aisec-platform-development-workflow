@@ -1,0 +1,135 @@
+name: 'Setup Ollama Model'
+description: 'Sets up Ollama service and loads the specified model'
+inputs:
+  model-name:
+    description: 'Model name to load (e.g., phi4-mini, llama3.2)'
+    required: true
+  ollama-endpoint:
+    description: 'Ollama API endpoint'
+    required: false
+    default: 'http://localhost:8000'
+  max-retries:
+    description: 'Maximum retries for model loading'
+    required: false
+    default: '60'
+  health-check-interval:
+    description: 'Seconds between health checks'
+    required: false
+    default: '5'
+outputs:
+  model-loaded:
+    description: 'Whether the model was successfully loaded'
+    value: ${{ steps.load-model.outputs.model-loaded }}
+  endpoint-url:
+    description: 'The OpenAI-compatible endpoint URL'
+    value: ${{ steps.load-model.outputs.endpoint-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Wait for Ollama Service
+      shell: bash
+      run: |
+        echo "::group::Waiting for Ollama service"
+        
+        endpoint="${{ inputs.ollama-endpoint }}"
+        
+        # Wait for Ollama to be ready
+        for i in {1..30}; do
+          if curl -s "${endpoint}/api/tags" >/dev/null 2>&1; then
+            echo "✅ Ollama is ready!"
+            break
+          fi
+          echo "Waiting for Ollama to start... ($i/30)"
+          sleep 2
+        done
+        
+        # Final check
+        if ! curl -s "${endpoint}/api/tags" >/dev/null 2>&1; then
+          echo "::error::Ollama service failed to start after 60 seconds"
+          exit 1
+        fi
+        
+        echo "::endgroup::"
+    
+    - name: Pull and Load Model
+      id: load-model
+      shell: bash
+      run: |
+        echo "::group::Loading model: ${{ inputs.model-name }}"
+        
+        endpoint="${{ inputs.ollama-endpoint }}"
+        model_name="${{ inputs.model-name }}"
+        
+        # Pull the model
+        echo "📥 Pulling model ${model_name}..."
+        curl -X POST "${endpoint}/api/pull" -d "{\"name\": \"${model_name}\"}"
+        
+        # Wait for model to be fully loaded
+        echo "⏳ Waiting for model to load..."
+        loaded=false
+        
+        for i in $(seq 1 ${{ inputs.max-retries }}); do
+          if curl -s -X POST "${endpoint}/api/show" -d "{\"name\": \"${model_name}\"}" | grep -q '"modelfile"'; then
+            echo "✅ Model ${model_name} is loaded!"
+            loaded=true
+            break
+          fi
+          echo "Waiting for model to load... ($i/${{ inputs.max-retries }})"
+          sleep ${{ inputs.health-check-interval }}
+        done
+        
+        if [ "$loaded" != "true" ]; then
+          echo "::error::Model failed to load after ${{ inputs.max-retries }} attempts"
+          echo "model-loaded=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+        echo "model-loaded=true" >> $GITHUB_OUTPUT
+        echo "endpoint-url=${endpoint}/v1/chat/completions" >> $GITHUB_OUTPUT
+        
+        echo "::endgroup::"
+    
+    - name: Test Model Endpoint
+      shell: bash
+      run: |
+        echo "::group::Testing model endpoint"
+        
+        endpoint="${{ inputs.ollama-endpoint }}/v1/chat/completions"
+        model_name="${{ inputs.model-name }}"
+        
+        echo "Testing endpoint: $endpoint"
+        echo "With model: $model_name"
+        
+        # Test with a simple request
+        echo "📤 Sending test request..."
+        response=$(curl -s -w "\n%{http_code}" -X POST "$endpoint" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"model\": \"${model_name}\",
+            \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}],
+            \"max_tokens\": 10
+          }")
+        
+        http_code=$(echo "$response" | tail -n1)
+        body=$(echo "$response" | sed '$d')
+        
+        echo "HTTP Status Code: $http_code"
+        echo "Response Body: $body"
+        
+        if [ "$http_code" != "200" ]; then
+          echo "::error::Model endpoint test failed with status: $http_code"
+          
+          if [ "$http_code" == "404" ]; then
+            echo "::error::Got 404 error - endpoint or model not found"
+            
+            # Check if model is actually loaded
+            echo "🔍 Checking if model is loaded..."
+            curl -s -X POST "${endpoint}/api/show" -d "{\"name\": \"${model_name}\"}"
+          fi
+          
+          exit 1
+        fi
+        
+        echo "✅ Model endpoint is working correctly!"
+        echo "::endgroup::" 

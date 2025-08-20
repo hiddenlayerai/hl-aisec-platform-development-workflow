@@ -1,0 +1,53 @@
+name: 'PR Comment Manager'
+description: 'Creates or updates a comment on a pull request'
+inputs:
+  comment-body:
+    description: 'The comment body (supports markdown)'
+    required: true
+  comment-identifier:
+    description: 'Unique identifier to find/update existing comments'
+    required: true
+  mode:
+    description: 'Comment mode: create-or-update, update-only, or create-only'
+    required: false
+    default: 'create-or-update'
+  pr-number:
+    description: 'Pull request number (defaults to current PR)'
+    required: false
+    default: ${{ github.event.pull_request.number }}
+  github-token:
+    description: 'GitHub token with issue write permissions'
+    required: false
+    default: ${{ github.token }}
+outputs:
+  comment-id:
+    description: 'The ID of the created or updated comment'
+    value: ${{ steps.comment.outputs.comment-id }}
+  comment-url:
+    description: 'The URL of the comment'
+    value: ${{ steps.comment.outputs.comment-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Find Existing Comment
+      id: find-comment
+      if: inputs.mode != 'create-only'
+      uses: peter-evans/find-comment@v3
+      with:
+        issue-number: ${{ inputs.pr-number }}
+        comment-author: 'github-actions[bot]'
+        body-includes: ${{ inputs.comment-identifier }}
+        token: ${{ inputs.github-token }}
+    
+    - name: Create or Update Comment
+      id: comment
+      uses: peter-evans/create-or-update-comment@v4
+      with:
+        issue-number: ${{ inputs.pr-number }}
+        comment-id: ${{ steps.find-comment.outputs.comment-id }}
+        edit-mode: ${{ steps.find-comment.outputs.comment-id && 'replace' || 'append' }}
+        body: |
+          <!-- ${{ inputs.comment-identifier }} -->
+          ${{ inputs.comment-body }}
+        token: ${{ inputs.github-token }} 

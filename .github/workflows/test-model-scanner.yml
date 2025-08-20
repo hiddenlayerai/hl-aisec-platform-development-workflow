@@ -1,0 +1,187 @@
+name: Test Model Scanner
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/model-scanner.yml'
+      - '.github/workflows/test-model-scanner.yml'
+      - 'model-scanner/**'
+      - 'hiddenlayer-auth/**'
+      - 'docker-login/**'
+      - 'submit-scan-results/**'
+      - 'retrieve-sarif-results/**'
+      - 'retrieve-aibom-results/**'
+      - 'check-hiddenlayer-ignores/**'
+      - 'pr-comment/**'
+      - 'test/ai_models/**'
+  workflow_dispatch:
+    inputs:
+      debug-mode:
+        description: 'Enable debug mode'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+  security-events: write
+
+jobs:
+  test-model-scanner:
+    name: Test Model Scanner
+    uses: ./.github/workflows/model-scanner.yml
+    with:
+      runs-on: ubuntu-latest
+      enforce-scan-detections: "false"
+      create-pr-comment: "false"  # Disable PR comments in test mode
+      model-scanner-version: "25.5.1"
+      # Don't provide HiddenLayer credentials to skip platform submission
+      # hiddenlayer-client-id: "test-client-id"
+      quay-username: ${{ vars.QUAY_USERNAME || 'hiddenlayerai+read_github_actions' }}
+    secrets:
+      # Only pass real secrets if they exist, otherwise the workflow will skip certain steps
+      HIDDENLAYER_CLIENT_SECRET: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+      HL_LICENSE_MODELSCANNER: ${{ secrets.HL_LICENSE_MODELSCANNER }}
+
+  validate-results:
+    name: Validate Scanner Results
+    runs-on: ubuntu-latest
+    needs: test-model-scanner
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Download AI scan results
+        uses: actions/download-artifact@v4
+        with:
+          name: ai-scan-results
+          path: scan-results
+        continue-on-error: true
+      
+      - name: Validate scan outputs
+        id: validate
+        run: |
+          echo "## 🧪 Model Scanner Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Check workflow outputs
+          echo "### Workflow Outputs" >> $GITHUB_STEP_SUMMARY
+          echo "- **Scan ID:** ${{ needs.test-model-scanner.outputs.scan-id || 'N/A (no platform submission)' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Model ID:** ${{ needs.test-model-scanner.outputs.model-id || 'N/A (no platform submission)' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Detections Found:** ${{ needs.test-model-scanner.outputs.detections-found || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Check if models were found
+          models_found="${{ needs.test-model-scanner.outputs.models-found-count }}"
+          echo "### AI Models Detection" >> $GITHUB_STEP_SUMMARY
+          echo "- **Models found:** ${models_found:-Unknown}" >> $GITHUB_STEP_SUMMARY
+          
+          # Handle case where summary might be empty or contain special characters
+          summary="${{ needs.test-model-scanner.outputs.ai-assets-summary }}"
+          if [ -n "$summary" ]; then
+            echo "- **Summary:** $summary" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Summary:** No summary available" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Validate HuggingFace detection
+          echo "### HuggingFace Models" >> $GITHUB_STEP_SUMMARY
+          if [ -f scan-results/hf_repos.json ]; then
+            hf_count=$(jq 'length' scan-results/hf_repos.json)
+            echo "- **HuggingFace repositories found:** $hf_count" >> $GITHUB_STEP_SUMMARY
+            
+            # List detected models
+            echo "- **Detected models:**" >> $GITHUB_STEP_SUMMARY
+            jq -r '.[]' scan-results/hf_repos.json | while read repo; do
+              echo "  - $repo" >> $GITHUB_STEP_SUMMARY
+            done
+            
+            # Validate expected models were found
+            expected_models=(
+              "bert-base-uncased"
+              "gpt2"
+            )
+            
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Validation Results" >> $GITHUB_STEP_SUMMARY
+            validation_passed=true
+            
+            for model in "${expected_models[@]}"; do
+              if jq -e --arg model "$model" '. | index($model)' scan-results/hf_repos.json > /dev/null; then
+                echo "- ✅ Found expected model: $model" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "- ❌ Missing expected model: $model" >> $GITHUB_STEP_SUMMARY
+                validation_passed=false
+              fi
+            done
+            
+            if [ "$validation_passed" = "true" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**✅ All 2 expected HuggingFace models were detected!**" >> $GITHUB_STEP_SUMMARY
+              echo "validation-status=passed" >> $GITHUB_OUTPUT
+            else
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**❌ Some expected models were not detected**" >> $GITHUB_STEP_SUMMARY
+              echo "validation-status=failed" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "- ❌ No HuggingFace repositories JSON file found" >> $GITHUB_STEP_SUMMARY
+            echo "validation-status=failed" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check AI scan results
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### AI Scan Results Analysis" >> $GITHUB_STEP_SUMMARY
+          if [ -f scan-results/ai-scan-results.json ]; then
+            echo "- ✅ AI scan results file found" >> $GITHUB_STEP_SUMMARY
+            
+            # Analyze providers detected
+            providers=$(jq -r '.ai_assets[].metadata.provider.name // .ai_assets[].metadata.source' scan-results/ai-scan-results.json 2>/dev/null | sort -u)
+            echo "- **Providers detected:**" >> $GITHUB_STEP_SUMMARY
+            echo "$providers" | while read provider; do
+              [ -n "$provider" ] && echo "  - $provider" >> $GITHUB_STEP_SUMMARY
+            done
+            
+            # Count total AI assets
+            asset_count=$(jq '.ai_assets | length' scan-results/ai-scan-results.json 2>/dev/null || echo "0")
+            echo "- **Total AI assets:** $asset_count" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ❌ AI scan results file not found" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "*Test completed at $(date -u +"%Y-%m-%d %H:%M:%S UTC")*" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Check validation status
+        if: steps.validate.outputs.validation-status == 'failed'
+        run: |
+          echo "::error::Model scanner validation failed. Check the summary for details."
+          exit 1
+
+  cleanup:
+    name: Cleanup Test Artifacts
+    runs-on: ubuntu-latest
+    needs: [test-model-scanner, validate-results]
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          echo "### 🧹 Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "Test workflow completed using permanent test files in test/ai_models/" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.validate-results.result }}" == "success" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**✅ All tests passed successfully!**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**❌ Some tests failed. Check the validation results above.**" >> $GITHUB_STEP_SUMMARY
+          fi 

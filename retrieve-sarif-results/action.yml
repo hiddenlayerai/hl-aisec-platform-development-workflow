@@ -1,0 +1,114 @@
+name: 'Retrieve SARIF Results from HiddenLayer'
+description: 'Retrieves scan results in SARIF format from HiddenLayer API'
+inputs:
+  scan-id:
+    description: 'Scan ID from HiddenLayer'
+    required: true
+  client-id:
+    description: 'HiddenLayer Client ID'
+    required: true
+  client-secret:
+    description: 'HiddenLayer Client Secret'
+    required: true
+  auth-url:
+    description: 'HiddenLayer Auth URL'
+    required: false
+    default: 'https://auth.hiddenlayer.ai'
+  api-url:
+    description: 'HiddenLayer API URL'
+    required: false
+    default: 'https://api.us.hiddenlayer.ai'
+  output-file:
+    description: 'Output SARIF file name'
+    required: false
+    default: 'scan-results.sarif'
+outputs:
+  sarif-file:
+    description: 'Path to SARIF file'
+    value: ${{ steps.retrieve.outputs.sarif-file }}
+  retrieval-status:
+    description: 'Status of retrieval (success or failed)'
+    value: ${{ steps.retrieve.outputs.retrieval-status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Authenticate with HiddenLayer
+      id: auth
+      shell: bash
+      env:
+        CLIENT_ID: ${{ inputs.client-id }}
+        CLIENT_SECRET: ${{ inputs.client-secret }}
+        AUTH_URL: ${{ inputs.auth-url }}
+      run: |
+        echo "::group::Authenticating with HiddenLayer"
+        
+        # Authenticate and get access token
+        auth_response=$(curl -s -X POST \
+          "$AUTH_URL/oauth2/token?grant_type=client_credentials" \
+          -u "$CLIENT_ID:$CLIENT_SECRET")
+        
+        # Extract access token
+        access_token=$(echo "$auth_response" | jq -r '.access_token')
+        
+        if [ -z "$access_token" ] || [ "$access_token" == "null" ]; then
+          echo "::warning::Failed to authenticate with HiddenLayer for SARIF retrieval"
+          echo "Response: $auth_response"
+          echo "retrieval-status=failed" >> $GITHUB_OUTPUT
+          exit 0  # Exit gracefully
+        fi
+        
+        echo "✅ Successfully authenticated"
+        echo "::add-mask::$access_token"
+        echo "access-token=$access_token" >> $GITHUB_OUTPUT
+        
+        echo "::endgroup::"
+    
+    - name: Retrieve SARIF Results
+      id: retrieve
+      shell: bash
+      env:
+        SCAN_ID: ${{ inputs.scan-id }}
+        API_URL: ${{ inputs.api-url }}
+        ACCESS_TOKEN: ${{ steps.auth.outputs.access-token }}
+        OUTPUT_FILE: ${{ inputs.output-file }}
+      run: |
+        echo "::group::Retrieving SARIF results for scan $SCAN_ID"
+        
+        # Check if authentication was successful
+        if [ -z "$ACCESS_TOKEN" ]; then
+          echo "::warning::Skipping SARIF retrieval due to authentication failure"
+          echo "retrieval-status=failed" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # Retrieve SARIF format results
+        response_code=$(curl -s -w "%{http_code}" -o "$OUTPUT_FILE" \
+          -X GET "$API_URL/scan/v3/results/$SCAN_ID" \
+          -H "Authorization: Bearer $ACCESS_TOKEN" \
+          -H "Accept: application/sarif+json")
+        
+        if [ "$response_code" != "200" ]; then
+          echo "::warning::Failed to retrieve SARIF results. HTTP status: $response_code"
+          if [ -f "$OUTPUT_FILE" ]; then
+            echo "Response body:"
+            cat "$OUTPUT_FILE"
+            rm "$OUTPUT_FILE"
+          fi
+          echo "retrieval-status=failed" >> $GITHUB_OUTPUT
+          exit 0  # Exit gracefully
+        fi
+        
+        # Validate SARIF format
+        if jq -e '.version' "$OUTPUT_FILE" > /dev/null 2>&1; then
+          echo "✅ Successfully retrieved SARIF results"
+          echo "SARIF version: $(jq -r '.version' "$OUTPUT_FILE")"
+          echo "sarif-file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
+          echo "retrieval-status=success" >> $GITHUB_OUTPUT
+        else
+          echo "::warning::Retrieved file is not valid SARIF format"
+          rm -f "$OUTPUT_FILE"
+          echo "retrieval-status=failed" >> $GITHUB_OUTPUT
+        fi
+        
+        echo "::endgroup::" 

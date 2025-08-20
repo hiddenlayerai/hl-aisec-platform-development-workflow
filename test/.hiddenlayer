@@ -1,0 +1,5 @@
+# Test ignore file for model scanner testing
+ignore:
+  - rule_id: "TEST_RULE"
+    reason: "Testing ignore functionality"
+    expires: "2025-12-31" 

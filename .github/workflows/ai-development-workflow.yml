@@ -1,0 +1,494 @@
+name: HiddenLayer AI Development Workflow v2
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner to execute the workflow on"
+        required: false
+        default: "ubuntu-latest"
+        type: string
+      
+      # Workflow Features
+      enable-model-scanning:
+        description: "Enable model scanning"
+        required: false
+        default: "true"
+        type: string
+      enable-basic-red-teaming:
+        description: "Enable basic red teaming (without AIDR protection)"
+        required: false
+        default: false
+        type: boolean
+      enable-red-teaming-with-aidr:
+        description: "Enable red teaming with AIDR protection"
+        required: false
+        default: false
+        type: boolean
+      
+      # Model Configuration (for Red Teaming)
+      model-name:
+        description: "Model name to test (e.g., phi4-mini, llama2)"
+        required: false
+        type: string
+      attack-tags:
+        description: "Attack category tags for red teaming (comma-separated)"
+        required: false
+        default: "quick-start"
+        type: string
+      planned-attempts:
+        description: "Number of planned attempts for each red teaming attack"
+        required: false
+        default: "1"
+        type: string
+      
+      # Scanning Configuration
+      model-scanner-version:
+        description: 'Model Scanner Version Tag'
+        required: false
+        default: '25.5.1'
+        type: string
+      enforce-scan-detections:
+        description: "Fail workflow if scan detections are found"
+        required: false
+        default: "false"
+        type: string
+      
+      # HiddenLayer Configuration
+      hiddenlayer-client-id:
+        description: "HiddenLayer Client ID"
+        required: false
+        type: string
+      hiddenlayer-api-url:
+        description: "HiddenLayer API URL"
+        required: false
+        default: "https://api.us.hiddenlayer.ai"
+        type: string
+      hiddenlayer-auth-url:
+        description: "HiddenLayer Auth URL"
+        required: false
+        default: "https://auth.hiddenlayer.ai"
+        type: string
+      hiddenlayer-console-url:
+        description: "HiddenLayer Console URL"
+        required: false
+        default: "https://console.us.hiddenlayer.ai"
+        type: string
+      model-provider:
+        description: "Model provider (ollama, openai, custom)"
+        required: false
+        default: "ollama"
+        type: string
+      model-endpoint:
+        description: "Custom model endpoint URL (if provider is custom)"
+        required: false
+        type: string
+      target-url:
+        description: "Override target URL for red teaming (optional - overrides automatic URL determination)"
+        required: false
+        type: string
+      
+      # Custom Service Configuration
+      service-docker-image:
+        description: "Docker image for custom service to test"
+        required: false
+        type: string
+      service-port:
+        description: "Port to expose for the custom service"
+        required: false
+        type: string
+      service-health-command:
+        description: "Command to check if service is healthy (optional)"
+        required: false
+        type: string
+      service-env-vars:
+        description: "Environment variables for the service (KEY=VALUE format, one per line)"
+        required: false
+        type: string
+      service-env-vars-aidr:
+        description: "Environment variables for the service when running with AIDR (KEY=VALUE format, one per line). If not specified, falls back to service-env-vars"
+        required: false
+        type: string
+      service-registry:
+        description: "Docker registry URL for custom service image (e.g., docker.io, ghcr.io, myregistry.com)"
+        required: false
+        type: string
+      service-registry-username:
+        description: "Username for Docker registry authentication"
+        required: false
+        type: string
+      
+      # Network Configuration
+      network-mode:
+        description: 'Docker network mode: "bridge" (recommended, secure) or "host" (legacy, less secure)'
+        required: false
+        default: "bridge"
+        type: string
+      
+      # AIDR Configuration
+      aidr-port:
+        description: "Port to run AIDR service on (default: 8000)"
+        required: false
+        default: "8000"
+        type: string
+      aidr-env-vars:
+        description: "Additional environment variables for AIDR service (KEY=VALUE format, one per line)"
+        required: false
+        type: string
+      
+      # Container Registry
+      quay-username:
+        description: "Quay.io username"
+        required: true
+        type: string
+    
+    secrets:
+      HIDDENLAYER_CLIENT_SECRET:
+        description: "HiddenLayer Client Secret"
+        required: false
+      QUAY_TOKEN:
+        description: "Quay.io token"
+        required: true
+      HL_LICENSE_MODELSCANNER:
+        description: "HiddenLayer Model Scanner License"
+        required: false
+      HL_LICENSE_AUTOMATED_RED_TEAMING:
+        description: "HiddenLayer Automated Red Teaming License"
+        required: false
+      HL_LICENSE_AIDR:
+        description: "HiddenLayer AIDR License"
+        required: false
+      HUGGINGFACE_TOKEN:
+        description: "HuggingFace API Token"
+        required: false
+      SERVICE_ENV_SECRETS:
+        description: "JSON object containing secrets for custom service environment variables"
+        required: false
+      SERVICE_ENV_SECRETS_AIDR:
+        description: "JSON object containing secrets for custom service when running with AIDR (falls back to SERVICE_ENV_SECRETS if not provided)"
+        required: false
+      AIDR_ENV_SECRETS:
+        description: "JSON object containing secrets for AIDR service environment variables"
+        required: false
+      SERVICE_REGISTRY_TOKEN:
+        description: "Password or token for Docker registry authentication"
+        required: false
+
+jobs:
+  validate-inputs:
+    name: Validate Workflow Inputs
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Validate Configuration
+        run: |
+          echo "::group::Validating workflow configuration"
+          
+          errors=0
+          
+          # Check if at least one feature is enabled
+          if [ "${{ inputs.enable-model-scanning }}" != "true" ] && [ "${{ inputs.enable-basic-red-teaming }}" != "true" ] && [ "${{ inputs.enable-red-teaming-with-aidr }}" != "true" ]; then
+            echo "::error::At least one feature must be enabled (model-scanning, basic-red-teaming, or red-teaming-with-aidr)"
+            ((errors++))
+          fi
+          
+          # Validate model scanning requirements
+          if [ "${{ inputs.enable-model-scanning }}" == "true" ]; then
+            if [ -z "${{ secrets.HL_LICENSE_MODELSCANNER }}" ]; then
+              echo "::error::Model scanning is enabled but HL_LICENSE_MODELSCANNER secret is not set"
+              ((errors++))
+            fi
+          fi
+          
+          # Validate red teaming requirements
+          if [ "${{ inputs.enable-basic-red-teaming }}" == "true" ] || [ "${{ inputs.enable-red-teaming-with-aidr }}" == "true" ]; then
+            if [ -z "${{ secrets.HL_LICENSE_AUTOMATED_RED_TEAMING }}" ]; then
+              echo "::error::Red teaming is enabled but HL_LICENSE_AUTOMATED_RED_TEAMING secret is not set"
+              ((errors++))
+            fi
+            if [ -z "${{ inputs.hiddenlayer-client-id }}" ] || [ -z "${{ secrets.HIDDENLAYER_CLIENT_SECRET }}" ]; then
+              echo "::error::Red teaming requires HiddenLayer authentication credentials"
+              ((errors++))
+            fi
+          fi
+          
+          # Validate AIDR requirements
+          if [ "${{ inputs.enable-red-teaming-with-aidr }}" == "true" ]; then
+            if [ -z "${{ secrets.HL_LICENSE_AIDR }}" ]; then
+              echo "::error::AIDR red teaming is enabled but HL_LICENSE_AIDR secret is not set"
+              exit 1
+            fi
+          fi
+          
+          if [ $errors -gt 0 ]; then
+            echo "::error::Found $errors configuration errors. Please fix them before proceeding."
+            exit 1
+          else
+            echo "✅ Configuration validation passed"
+          fi
+          
+          echo "::endgroup::"
+          
+          # Display enabled features
+          echo "## 🔧 Workflow Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Feature | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Model Scanning | ${{ inputs.enable-model-scanning == 'true' && '✅ Enabled' || '❌ Disabled' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Basic Red Teaming | ${{ (inputs.enable-basic-red-teaming == true || inputs.enable-basic-red-teaming == 'true') && '✅ Enabled' || '❌ Disabled' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| AIDR Red Teaming | ${{ (inputs.enable-red-teaming-with-aidr == true || inputs.enable-red-teaming-with-aidr == 'true') && '✅ Enabled' || '❌ Disabled' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Enforce Detections | ${{ inputs.enforce-scan-detections == 'true' && '✅ Yes' || '⚠️ No' }} |" >> $GITHUB_STEP_SUMMARY
+
+  model-scan:
+    name: Model Scanning
+    if: inputs.enable-model-scanning == 'true'
+    needs: [validate-inputs]
+    uses: ./.github/workflows/model-scanner.yml
+    with:
+      runs-on: ${{ inputs.runs-on }}
+      hiddenlayer-client-id: ${{ inputs.hiddenlayer-client-id }}
+      hiddenlayer-api-url: ${{ inputs.hiddenlayer-api-url }}
+      hiddenlayer-auth-url: ${{ inputs.hiddenlayer-auth-url }}
+      hiddenlayer-console-url: ${{ inputs.hiddenlayer-console-url }}
+      model-scanner-version: ${{ inputs.model-scanner-version }}
+      enforce-scan-detections: ${{ inputs.enforce-scan-detections }}
+      quay-username: ${{ inputs.quay-username }}
+      create-pr-comment: 'false'  # Disable individual PR comment
+    secrets: inherit
+  
+  red-team:
+    name: Red Teaming
+    if: inputs.enable-basic-red-teaming == true || inputs.enable-basic-red-teaming == 'true' || inputs.enable-red-teaming-with-aidr == true || inputs.enable-red-teaming-with-aidr == 'true'
+    needs: [validate-inputs]
+    uses: ./.github/workflows/automated-red-teaming.yml
+    with:
+      runs-on: ${{ inputs.runs-on }}
+      model-name: ${{ inputs.model-name }}
+      model-provider: ${{ inputs.model-provider }}
+      model-endpoint: ${{ inputs.model-endpoint }}
+      target-url: ${{ inputs.target-url }}
+      service-docker-image: ${{ inputs.service-docker-image }}
+      service-port: ${{ inputs.service-port }}
+      service-health-command: ${{ inputs.service-health-command }}
+      service-env-vars: ${{ inputs.service-env-vars }}
+      service-env-vars-aidr: ${{ inputs.service-env-vars-aidr }}
+      service-registry: ${{ inputs.service-registry }}
+      service-registry-username: ${{ inputs.service-registry-username }}
+      network-mode: ${{ inputs.network-mode }}
+      aidr-port: ${{ inputs.aidr-port }}
+      aidr-env-vars: ${{ inputs.aidr-env-vars }}
+      attack-tags: ${{ inputs.attack-tags }}
+      planned-attempts: ${{ inputs.planned-attempts }}
+      enable-basic-red-teaming: ${{ inputs.enable-basic-red-teaming }}
+      enable-red-teaming-with-aidr: ${{ inputs.enable-red-teaming-with-aidr }}
+      hiddenlayer-client-id: ${{ inputs.hiddenlayer-client-id }}
+      hiddenlayer-api-url: ${{ inputs.hiddenlayer-api-url }}
+      hiddenlayer-auth-url: ${{ inputs.hiddenlayer-auth-url }}
+      hiddenlayer-console-url: ${{ inputs.hiddenlayer-console-url }}
+      quay-username: ${{ inputs.quay-username }}
+      create-pr-comment: 'false'  # Disable individual PR comment
+    secrets: inherit
+  
+  summary:
+    name: Workflow Summary
+    runs-on: ${{ inputs.runs-on }}
+    if: always()
+    needs: [validate-inputs, model-scan, red-team]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Generate Final Summary
+        run: |
+          echo "## 🎯 AI Development Workflow Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Configuration summary
+          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repository:** ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Results summary
+          echo "### Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Model Scanning Results
+          if [ "${{ inputs.enable-model-scanning }}" == "true" ]; then
+            echo "#### 🔍 Model Scanning" >> $GITHUB_STEP_SUMMARY
+            if [ "${{ needs.model-scan.result }}" == "success" ]; then
+              echo "✅ **Status:** Completed successfully" >> $GITHUB_STEP_SUMMARY
+            elif [ "${{ needs.model-scan.result }}" == "failure" ]; then
+              echo "❌ **Status:** Failed or found issues" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "⏭️ **Status:** Skipped" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Red Teaming Results
+          if [ "${{ inputs.enable-basic-red-teaming }}" == "true" ] || [ "${{ inputs.enable-red-teaming-with-aidr }}" == "true" ]; then
+            echo "#### 🎯 Automated Red Teaming" >> $GITHUB_STEP_SUMMARY
+            if [ "${{ needs.red-team.result }}" == "success" ]; then
+              echo "✅ **Status:** Completed successfully" >> $GITHUB_STEP_SUMMARY
+              echo "- **Model:** ${{ inputs.model-name }}" >> $GITHUB_STEP_SUMMARY
+              protection="${{ needs.red-team.outputs.scan-type }}"
+              echo "- **Protection:** ${protection:-Basic}" >> $GITHUB_STEP_SUMMARY
+            elif [ "${{ needs.red-team.result }}" == "failure" ]; then
+              echo "❌ **Status:** Failed" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "⏭️ **Status:** Skipped" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Overall status
+          echo "### Overall Status" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.model-scan.result }}" == "success" ] && [ "${{ needs.red-team.result }}" == "success" ]; then
+            echo "✅ **All security checks passed successfully!**" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.model-scan.result }}" == "failure" ] || [ "${{ needs.red-team.result }}" == "failure" ]; then
+            echo "❌ **Security issues detected. Please review the findings above.**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ **Workflow completed with warnings. Please review the results.**" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "*Generated by HiddenLayer AI Security Workflow v2*" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Create Comprehensive PR Comment
+        if: github.event_name == 'pull_request'
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/pr-comment@v1
+        with:
+          comment-identifier: 'hiddenlayer-ai-security-comprehensive'
+          comment-body: |
+            # 🛡️ HiddenLayer AI Security Report
+            
+            ## 📊 Summary
+            **Repository:** ${{ github.repository }}  
+            **Commit:** `${{ github.event.pull_request.head.sha }}`  
+            **Status:** ${{ (needs.model-scan.result == 'failure' || needs.red-team.result == 'failure') && '❌ Security Issues Found' || '✅ All Checks Passed' }}
+            
+            ## 🔍 Model Scanning
+            ${{ inputs.enable-model-scanning != 'true' && '⏭️ *Not configured*' || needs.model-scan.result == 'skipped' && '⏭️ *Skipped*' || needs.model-scan.result == 'failure' && '❌ **Failed**' || '✅ **Completed**' }}
+            
+            ${{ needs.model-scan.outputs.detection-summary && format('**Summary:** {0}', needs.model-scan.outputs.detection-summary) || '' }}
+            
+            ${{ needs.model-scan.outputs.model-id && format('[View all scans for this model →]({0}/model-details/{1})', inputs.hiddenlayer-console-url, needs.model-scan.outputs.model-id) || '' }}
+            ${{ needs.model-scan.outputs.scan-id && needs.model-scan.outputs.model-id && format(' | [View this scan →]({0}/model-details/{1}/scans/{2})', inputs.hiddenlayer-console-url, needs.model-scan.outputs.model-id, needs.model-scan.outputs.scan-id) || '' }}
+            
+            ## 🎯 Automated Red Teaming
+            ${{ ((inputs.enable-basic-red-teaming != true && inputs.enable-basic-red-teaming != 'true') && (inputs.enable-red-teaming-with-aidr != true && inputs.enable-red-teaming-with-aidr != 'true')) && '⏭️ *Not configured*' || needs.red-team.result == 'skipped' && '⏭️ *Skipped*' || needs.red-team.result == 'failure' && '❌ **Failed**' || '✅ **Completed**' }}
+            
+            **Model:** ${{ inputs.model-name || 'N/A' }}  
+            **Protection:** ${{ needs.red-team.outputs.scan-type }}
+            
+            ${{ needs.red-team.outputs.report-summary && format('**Summary:** {0}', needs.red-team.outputs.report-summary) || '' }}
+            
+            ${{ needs.red-team.outputs.scan-id && format('[View red teaming report →]({0}/automated-red-teaming?activeTab=reports&target_name={1})', inputs.hiddenlayer-console-url, github.repository) || '' }}
+            
+            ## 📋 Configuration
+            | Feature | Status |
+            |---------|--------|
+            | Model Scanning | ${{ inputs.enable-model-scanning == 'true' && '✅ Enabled' || '❌ Disabled' }} |
+            | Basic Red Teaming | ${{ (inputs.enable-basic-red-teaming == true || inputs.enable-basic-red-teaming == 'true') && '✅ Enabled' || '❌ Disabled' }} |
+            | AIDR Red Teaming | ${{ (inputs.enable-red-teaming-with-aidr == true || inputs.enable-red-teaming-with-aidr == 'true') && '✅ Enabled' || '❌ Disabled' }} |
+            | Enforce Detections | ${{ inputs.enforce-scan-detections == 'true' && '✅ Yes' || '⚠️ No' }} |
+            
+            ## 📈 Results Summary
+            
+            | Check | Finding |
+            |-------|---------|
+            | Model Scan Detections | ${{ needs.model-scan.outputs.detections-found == 'true' && '⚠️ Issues Found' || needs.model-scan.result == 'skipped' && 'N/A' || '✅ Clean' }} |
+            | Red Team Vulnerabilities | ${{ needs.red-team.outputs.total-findings && needs.red-team.outputs.total-findings != '0' && format('⚠️ {0} Found', needs.red-team.outputs.total-findings) || needs.red-team.result == 'skipped' && 'N/A' || '✅ None' }} |
+            
+            ## 📎 Artifacts
+            
+            ${{ inputs.enable-model-scanning == 'true' && needs.model-scan.result != 'skipped' && format('### Model Scanning Artifacts
+            - 📄 [Repository Scan Results (JSON)](https://github.com/{0}/actions/runs/{1}#:~:text=repository-scan-results)
+            - 🛡️ [SARIF Report](https://github.com/{0}/actions/runs/{1}#:~:text=repository-scan-results)
+            - 📦 [AIBOM (CycloneDX)](https://github.com/{0}/actions/runs/{1}#:~:text=repository-scan-results)
+            - 🔍 [HuggingFace Model Scans](https://github.com/{0}/actions/runs/{1}) *(if applicable)*
+            
+            ', github.repository, github.run_id) || '' }}${{ needs.red-team.result != 'skipped' && format('### Red Teaming Artifacts', '') || '' }}
+            ${{ (inputs.enable-basic-red-teaming == true || inputs.enable-basic-red-teaming == 'true') && needs.red-team.result != 'skipped' && format('- 📄 [Basic Red Teaming Results (ZIP)](https://github.com/{0}/actions/runs/{1}#:~:text=red-teaming-basic-artifacts)', github.repository, github.run_id) || '' }}
+            ${{ (inputs.enable-red-teaming-with-aidr == true || inputs.enable-red-teaming-with-aidr == 'true') && needs.red-team.result != 'skipped' && format('- 📄 [AIDR Red Teaming Results (ZIP)](https://github.com/{0}/actions/runs/{1}#:~:text=red-teaming-aidr-artifacts)', github.repository, github.run_id) || '' }}
+            ${{ needs.red-team.result != 'skipped' && format('- 📊 [Consolidated Report](https://github.com/{0}/actions/runs/{1}#:~:text=red-teaming-consolidated-report)
+            
+            *Note: ZIP files contain detailed CSV reports with attack prompts, responses, and detection results.*', github.repository, github.run_id) || '' }}
+            
+            ${{ (inputs.enable-model-scanning == 'true' || inputs.enable-basic-red-teaming == true || inputs.enable-basic-red-teaming == 'true' || inputs.enable-red-teaming-with-aidr == true || inputs.enable-red-teaming-with-aidr == 'true') && format('### 📥 Download All Artifacts
+            [Access all artifacts from the workflow run →](https://github.com/{0}/actions/runs/{1})', github.repository, github.run_id) || '' }}
+            
+            ---
+            
+            <details>
+            <summary>📖 What do these checks do?</summary>
+            
+            - **Model Scanning**: Analyzes ML model files for malicious code, backdoors, and vulnerabilities
+            - **Red Teaming**: Tests model resilience against adversarial attacks and prompt injections
+            - **AIDR**: AI Detection and Response provides real-time protection against attacks
+            
+            </details>
+            
+            <details>
+            <summary>🔧 Workflow Configuration</summary>
+            
+            ```yaml
+            enable-model-scanning: ${{ inputs.enable-model-scanning }}
+            enable-basic-red-teaming: ${{ inputs.enable-basic-red-teaming }}
+            enable-red-teaming-with-aidr: ${{ inputs.enable-red-teaming-with-aidr }}
+            enforce-scan-detections: ${{ inputs.enforce-scan-detections }}
+            model-name: ${{ inputs.model-name }}
+            attack-tags: ${{ inputs.attack-tags }}
+            planned-attempts: ${{ inputs.planned-attempts }}
+            ```
+            
+            </details>
+            
+            ---
+            *🕐 Report generated at ${{ github.event.pull_request.updated_at || 'workflow completion' }}*  
+            *View full details in the [workflow run →](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+            
+            <sub>Note: Some artifacts (SARIF, AIBOM, CSV reports) may not be available if retrieval from HiddenLayer platform failed. Check workflow logs for details.</sub>
+  final-summary:
+    name: Final Workflow Summary
+    runs-on: ${{ inputs.runs-on }}
+    if: always()
+    needs: [validate-inputs, model-scan, red-team, summary]
+    steps:
+      - name: Generate Complete Summary
+        run: |
+          echo "## 🏁 Complete Workflow Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Overall workflow status
+          workflow_success="true"
+          if [ "${{ needs.model-scan.result }}" == "failure" ] || [ "${{ needs.red-team.result }}" == "failure" ]; then
+            workflow_success="false"
+          fi
+          
+          if [ "$workflow_success" == "true" ]; then
+            echo "### ✅ Workflow Status: SUCCESS" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Workflow Status: FAILED (Security Issues Found)" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Quick links
+          echo "### 🔗 Quick Links" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # HiddenLayer console links
+          if [ "${{ needs.model-scan.outputs.model-id }}" != "" ]; then
+            echo "- 🔍 [Model in HiddenLayer Console](${{ inputs.hiddenlayer-console-url }}/model-details/${{ needs.model-scan.outputs.model-id }})" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # GitHub links
+          echo "- 📂 [Repository](${{ github.server_url }}/${{ github.repository }})" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔄 [Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          echo "- 📥 [Download Artifacts](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts)" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "*Workflow completed at $(date -u +"%Y-%m-%d %H:%M:%S UTC")*" >> $GITHUB_STEP_SUMMARY

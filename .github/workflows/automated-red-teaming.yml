@@ -1,0 +1,1226 @@
+name: HiddenLayer Automated Red Teaming v2
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner to execute the workflow on"
+        required: false
+        default: "ubuntu-latest"
+        type: string
+      
+      # Model Configuration
+      model-name:
+        description: "Model name to test (e.g., phi4-mini, llama2)"
+        required: true
+        type: string
+      model-provider:
+        description: "Model provider (ollama, openai, custom)"
+        required: false
+        default: "ollama"
+        type: string
+      model-endpoint:
+        description: "Custom model endpoint URL (if provider is custom)"
+        required: false
+        type: string
+      target-url:
+        description: "Override target URL for red teaming (optional - overrides automatic URL determination)"
+        required: false
+        type: string
+      
+      # Custom Service Configuration
+      service-docker-image:
+        description: "Docker image for custom service to test"
+        required: false
+        type: string
+      service-port:
+        description: "Port to expose for the custom service"
+        required: false
+        type: string
+      service-health-command:
+        description: "Command to check if service is healthy (optional)"
+        required: false
+        type: string
+      service-env-vars:
+        description: "Environment variables for the service (KEY=VALUE format, one per line)"
+        required: false
+        type: string
+      service-env-vars-aidr:
+        description: "Environment variables for the service when running with AIDR (KEY=VALUE format, one per line). If not specified, falls back to service-env-vars"
+        required: false
+        type: string
+      service-registry:
+        description: "Docker registry URL for custom service image (e.g., docker.io, ghcr.io, myregistry.com)"
+        required: false
+        type: string
+      service-registry-username:
+        description: "Username for Docker registry authentication"
+        required: false
+        type: string
+      
+      # Network Configuration
+      network-mode:
+        description: 'Docker network mode: "bridge" (recommended, secure) or "host" (legacy, less secure)'
+        required: false
+        default: "bridge"
+        type: string
+      
+      # AIDR Configuration
+      aidr-port:
+        description: "Port to run AIDR service on (default: 8000)"
+        required: false
+        default: "8000"
+        type: string
+      aidr-env-vars:
+        description: "Additional environment variables for AIDR service (KEY=VALUE format, one per line)"
+        required: false
+        type: string
+      
+      # Red Teaming Configuration
+      attack-tags:
+        description: "Attack category tags (comma-separated)"
+        required: false
+        default: "quick-start"
+        type: string
+      planned-attempts:
+        description: "Number of planned attempts for each attack"
+        required: false
+        default: "1"
+        type: string
+      enable-basic-red-teaming:
+        description: "Enable basic red teaming (without AIDR protection)"
+        required: false
+        default: false
+        type: boolean
+      enable-red-teaming-with-aidr:
+        description: "Enable red teaming with AIDR protection"
+        required: false
+        default: false
+        type: boolean
+      
+      # HiddenLayer Configuration
+      hiddenlayer-client-id:
+        description: "HiddenLayer Client ID"
+        required: true
+        type: string
+      hiddenlayer-api-url:
+        description: "HiddenLayer API URL"
+        required: false
+        default: "https://api.us.hiddenlayer.ai"
+        type: string
+      hiddenlayer-auth-url:
+        description: "HiddenLayer Auth URL"
+        required: false
+        default: "https://auth.hiddenlayer.ai"
+        type: string
+      hiddenlayer-console-url:
+        description: "HiddenLayer Console URL"
+        required: false
+        default: "https://console.us.hiddenlayer.ai"
+        type: string
+      
+      # Container Registry
+      quay-username:
+        description: "Quay.io username"
+        required: true
+        type: string
+      
+      # PR Comment
+      create-pr-comment:
+        description: "Create PR comment with results"
+        required: false
+        default: "true"
+        type: string
+    
+    outputs:
+      scan-id:
+        description: 'Red teaming scan ID(s)'
+        value: ${{ jobs.red-teaming-basic.outputs.scan-id || jobs.red-teaming-aidr.outputs.scan-id }}
+      basic-scan-id:
+        description: 'Basic red teaming scan ID'
+        value: ${{ jobs.red-teaming-basic.outputs.scan-id }}
+      aidr-scan-id:
+        description: 'AIDR red teaming scan ID'
+        value: ${{ jobs.red-teaming-aidr.outputs.scan-id }}
+      scan-type:
+        description: 'Type of scan performed'
+        value: |
+          ${{ inputs.enable-basic-red-teaming && inputs.enable-red-teaming-with-aidr && 'Basic + AIDR-Protected' ||
+              inputs.enable-basic-red-teaming && 'Basic' ||
+              inputs.enable-red-teaming-with-aidr && 'AIDR-Protected' || 'None' }}
+      total-findings:
+        description: 'Total number of findings'
+        value: ${{ jobs.report.outputs.total-findings }}
+      report-summary:
+        description: 'Summary of red teaming results'
+        value: ${{ jobs.report.outputs.report-summary }}
+    
+    secrets:
+      HIDDENLAYER_CLIENT_SECRET:
+        description: "HiddenLayer Client Secret"
+        required: true
+      QUAY_TOKEN:
+        description: "Quay.io token"
+        required: true
+      HL_LICENSE_AUTOMATED_RED_TEAMING:
+        description: "HiddenLayer Automated Red Teaming License"
+        required: true
+      HL_LICENSE_AIDR:
+        description: "HiddenLayer AIDR License"
+        required: false
+      HUGGINGFACE_TOKEN:
+        description: "HuggingFace API Token (required for some models)"
+        required: false
+      SERVICE_ENV_SECRETS:
+        description: "JSON object containing secrets for custom service environment variables"
+        required: false
+      SERVICE_ENV_SECRETS_AIDR:
+        description: "JSON object containing secrets for custom service when running with AIDR (falls back to SERVICE_ENV_SECRETS if not provided)"
+        required: false
+      AIDR_ENV_SECRETS:
+        description: "JSON object containing secrets for AIDR service environment variables"
+        required: false
+      SERVICE_REGISTRY_TOKEN:
+        description: "Password or token for Docker registry authentication"
+        required: false
+
+jobs:
+  prepare-service:
+    name: Prepare Service Configuration
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      use-custom-service: ${{ steps.check-service.outputs.use-custom-service }}
+      service-endpoint: ${{ steps.check-service.outputs.service-endpoint }}
+    steps:
+      - name: Check Service Configuration
+        id: check-service
+        run: |
+          echo "::group::Checking service configuration"
+          
+          # Check if custom service is configured
+          if [ -n "${{ inputs.service-docker-image }}" ] && [ -n "${{ inputs.service-port }}" ]; then
+            echo "use-custom-service=true" >> $GITHUB_OUTPUT
+            echo "service-endpoint=http://localhost:${{ inputs.service-port }}" >> $GITHUB_OUTPUT
+            echo "✅ Using custom service: ${{ inputs.service-docker-image }}"
+            echo "   Port: ${{ inputs.service-port }}"
+          else
+            echo "use-custom-service=false" >> $GITHUB_OUTPUT
+            echo "service-endpoint=" >> $GITHUB_OUTPUT
+            echo "ℹ️ Using default provider: ${{ inputs.model-provider }}"
+          fi
+          
+          echo "::endgroup::"
+
+  red-teaming-basic:
+    name: Red Teaming - Basic
+    runs-on: ${{ inputs.runs-on }}
+    needs: [prepare-service]
+    if: inputs.enable-basic-red-teaming == true || inputs.enable-basic-red-teaming == 'true'
+    outputs:
+      scan-id: ${{ steps.run-red-teaming.outputs.scan-id }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Docker Network
+        id: network-setup
+        run: |
+          echo "::group::Setting up Docker networking"
+          
+          if [ "${{ inputs.network-mode }}" == "host" ]; then
+            echo "⚠️ Using host network mode (legacy - consider using bridge mode for better security)"
+            echo "network-arg=--network host" >> $GITHUB_OUTPUT
+            echo "backend-host=localhost" >> $GITHUB_OUTPUT
+            echo "aidr-can-reach=localhost" >> $GITHUB_OUTPUT
+          else
+            echo "✅ Using bridge network mode (recommended)"
+            # Create a unique network name to avoid conflicts
+            NETWORK_NAME="ai-testing-${{ github.run_id }}-${{ github.run_attempt }}"
+            docker network create "$NETWORK_NAME" || true
+            
+            echo "network-arg=--network $NETWORK_NAME" >> $GITHUB_OUTPUT
+            echo "network-name=$NETWORK_NAME" >> $GITHUB_OUTPUT
+            echo "backend-host=backend-service" >> $GITHUB_OUTPUT
+            echo "aidr-can-reach=backend-service" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "::endgroup::"
+      
+      - name: Login to Custom Registry
+        if: needs.prepare-service.outputs.use-custom-service == 'true' && inputs.service-registry != '' && inputs.service-registry-username != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.service-registry }}
+          username: ${{ inputs.service-registry-username }}
+          password: ${{ secrets.SERVICE_REGISTRY_TOKEN }}
+      
+      - name: Start Custom Service
+        if: needs.prepare-service.outputs.use-custom-service == 'true'
+        id: custom-service
+        run: |
+          echo "::group::Starting custom service"
+          
+                    # Prepare environment variables
+          ENV_ARGS=""
+          
+          # First, add any secrets passed via SERVICE_ENV_SECRETS
+          if [ -n '${{ secrets.SERVICE_ENV_SECRETS }}' ]; then
+            echo "Processing service secrets..."
+            
+            # Check if jq is available
+            if ! command -v jq &> /dev/null; then
+              echo "Warning: jq is not available, cannot parse SERVICE_ENV_SECRETS"
+            else
+              # Create a temporary file to store the env args
+              temp_env_file=$(mktemp)
+            
+            # Parse JSON and create environment variable arguments
+            echo '${{ secrets.SERVICE_ENV_SECRETS }}' | jq -r 'to_entries | .[] | "-e \(.key)=\(.value)"' > "$temp_env_file" || {
+              echo "Warning: Failed to parse SERVICE_ENV_SECRETS as JSON"
+              rm -f "$temp_env_file"
+            }
+            
+            # Read the arguments if file exists and has content
+            if [ -s "$temp_env_file" ]; then
+              while IFS= read -r env_arg; do
+                ENV_ARGS="$ENV_ARGS $env_arg"
+                # Extract and log just the variable name
+                var_name=$(echo "$env_arg" | sed 's/-e //' | cut -d'=' -f1)
+                echo "  Added secret: $var_name"
+              done < "$temp_env_file"
+            fi
+            
+            rm -f "$temp_env_file"
+            fi
+          fi
+          
+          # Then add regular environment variables
+          if [ -n "${{ inputs.service-env-vars }}" ]; then
+            echo "Processing service environment variables..."
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              # Skip comments
+              [[ "$line" =~ ^[[:space:]]*# ]] && continue
+              # Trim leading/trailing whitespace
+              line=$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+              [ -z "$line" ] && continue
+              
+              # Extract variable name and value
+              var_name="${line%%=*}"
+              var_value="${line#*=}"
+              
+              # Add to docker args
+              ENV_ARGS="$ENV_ARGS -e $var_name=\"$var_value\""
+              
+              # Log only the variable name for security
+              echo "  Added: $var_name"
+            done <<< "${{ inputs.service-env-vars }}"
+          fi
+          
+          # Start the service with network configuration
+          NETWORK_ARG="${{ steps.network-setup.outputs.network-arg }}"
+          
+          eval "docker run -d \
+            --name custom-test-service \
+            $NETWORK_ARG \
+            -p ${{ inputs.service-port }}:${{ inputs.service-port }} \
+            $ENV_ARGS \
+            ${{ inputs.service-docker-image }}"
+          
+          # Wait for service to be ready
+          echo "Waiting for service to start..."
+          sleep 5
+          
+          # Run health check if provided
+          if [ -n "${{ inputs.service-health-command }}" ]; then
+            echo "Running health check..."
+            max_attempts=30
+            attempt=0
+            while [ $attempt -lt $max_attempts ]; do
+              if eval "${{ inputs.service-health-command }}"; then
+                echo "✅ Service is healthy"
+                break
+              fi
+              attempt=$((attempt + 1))
+              echo "Waiting for service to be healthy... (attempt $attempt/$max_attempts)"
+              sleep 2
+            done
+            
+            if [ $attempt -eq $max_attempts ]; then
+              echo "::error::Service health check failed after $max_attempts attempts"
+              docker logs custom-test-service
+              exit 1
+            fi
+          fi
+          
+          echo "::endgroup::"
+      
+      - name: Start Ollama Service
+        if: needs.prepare-service.outputs.use-custom-service != 'true' && inputs.model-provider == 'ollama'
+        run: |
+          echo "::group::Starting Ollama service"
+          
+          NETWORK_ARG="${{ steps.network-setup.outputs.network-arg }}"
+          
+          docker run -d \
+            --name ollama-service \
+            $NETWORK_ARG \
+            -p 8000:11434 \
+            ollama/ollama:latest
+          
+          # Wait for Ollama to be ready
+          echo "Waiting for Ollama to start..."
+          max_attempts=30
+          attempt=0
+          while [ $attempt -lt $max_attempts ]; do
+            if curl -s http://localhost:8000/api/tags >/dev/null 2>&1; then
+              echo "✅ Ollama is ready"
+              break
+            fi
+            attempt=$((attempt + 1))
+            echo "Waiting for Ollama... (attempt $attempt/$max_attempts)"
+            sleep 2
+          done
+          
+          if [ $attempt -eq $max_attempts ]; then
+            echo "::error::Ollama failed to start"
+            docker logs ollama-service
+            exit 1
+          fi
+          echo "::endgroup::"
+      
+      - name: Setup Ollama Model
+        if: needs.prepare-service.outputs.use-custom-service != 'true' && inputs.model-provider == 'ollama'
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-ollama@v1
+        with:
+          model-name: ${{ inputs.model-name }}
+          ollama-endpoint: http://localhost:8000
+      
+      - name: Login to Container Registry
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/docker-login@v1
+        with:
+          quay-username: ${{ inputs.quay-username }}
+          quay-token: ${{ secrets.QUAY_TOKEN }}
+      
+      - name: Determine Target URL
+        id: determine-url
+        run: |
+          # Use provided target-url if specified
+          if [ -n "${{ inputs.target-url }}" ]; then
+            echo "target-url=${{ inputs.target-url }}" >> $GITHUB_OUTPUT
+            echo "ℹ️ Using override target URL: ${{ inputs.target-url }}"
+          elif [ "${{ needs.prepare-service.outputs.use-custom-service }}" == "true" ]; then
+            echo "target-url=${{ needs.prepare-service.outputs.service-endpoint }}" >> $GITHUB_OUTPUT
+            echo "ℹ️ Using custom service URL: ${{ needs.prepare-service.outputs.service-endpoint }}"
+          elif [ "${{ inputs.model-provider }}" == "custom" ]; then
+            echo "target-url=${{ inputs.model-endpoint }}" >> $GITHUB_OUTPUT
+            echo "ℹ️ Using custom model endpoint: ${{ inputs.model-endpoint }}"
+          else
+            echo "target-url=http://localhost:8000/v1/chat/completions" >> $GITHUB_OUTPUT
+            echo "ℹ️ Using default Ollama URL: http://localhost:8000/v1/chat/completions"
+          fi
+      
+      - name: Create Red Teaming Target
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/create-red-teaming-target@v1
+        with:
+          target-name: ${{ github.repository }}
+          target-url: ${{ steps.determine-url.outputs.target-url }}
+          client-id: ${{ inputs.hiddenlayer-client-id }}
+          client-secret: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+          api-url: ${{ inputs.hiddenlayer-api-url }}
+          auth-url: ${{ inputs.hiddenlayer-auth-url }}
+      
+      - name: Run Automated Red Teaming
+        id: run-red-teaming
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/run-red-teaming@v1
+        with:
+          target-url: ${{ steps.determine-url.outputs.target-url }}
+          model-name: ${{ inputs.model-name }}
+          attack-tags: ${{ inputs.attack-tags }}
+          planned-attempts: ${{ inputs.planned-attempts }}
+          license: ${{ secrets.HL_LICENSE_AUTOMATED_RED_TEAMING }}
+          client-id: ${{ inputs.hiddenlayer-client-id }}
+          client-secret: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+          api-url: ${{ inputs.hiddenlayer-api-url }}
+          auth-url: ${{ inputs.hiddenlayer-auth-url }}
+          console-url: ${{ inputs.hiddenlayer-console-url }}
+      
+      - name: Retrieve Red Teaming Artifacts
+        id: retrieve-artifacts
+        if: steps.run-red-teaming.outputs.scan-id != ''
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-red-teaming-artifacts@v1
+        with:
+          scan-id: ${{ steps.run-red-teaming.outputs.scan-id }}
+          client-id: ${{ inputs.hiddenlayer-client-id }}
+          client-secret: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+          auth-url: ${{ inputs.hiddenlayer-auth-url }}
+          api-url: ${{ inputs.hiddenlayer-api-url }}
+          output-file: red-teaming-basic-artifacts.zip
+          extract-files: 'true'
+      
+      - name: Upload Red Teaming Artifacts
+        if: steps.retrieve-artifacts.outputs.artifacts-file != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: red-teaming-basic-artifacts
+          path: |
+            ${{ steps.retrieve-artifacts.outputs.artifacts-file }}
+            ${{ steps.retrieve-artifacts.outputs.artifacts-dir }}/**/*.csv
+          if-no-files-found: warn
+      
+      - name: Capture Docker Logs
+        if: always()
+        run: |
+          echo "::group::Docker Container Logs"
+          
+          # Show all containers status
+          echo "🐳 Container Status:"
+          echo "==================="
+          docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Image}}" | grep -E "(custom-test-service|ollama-service|NAMES)" || true
+          echo ""
+          
+          # Capture custom service logs if it exists
+          if docker ps -a | grep -q custom-test-service; then
+            echo "📋 Custom Service Logs:"
+            echo "========================"
+            docker logs --tail 200 custom-test-service 2>&1 || echo "Failed to retrieve custom service logs"
+            echo ""
+          fi
+          
+          # Capture Ollama logs if it exists
+          if docker ps -a | grep -q ollama-service; then
+            echo "📋 Ollama Service Logs:"
+            echo "========================"
+            docker logs --tail 200 ollama-service 2>&1 || echo "Failed to retrieve Ollama logs"
+            echo ""
+          fi
+          
+          echo "::endgroup::"
+      
+      - name: Cleanup Services
+        if: always()
+        run: |
+          # Stop and remove custom service if it was started
+          if docker ps -a | grep -q custom-test-service; then
+            docker stop custom-test-service || true
+            docker rm custom-test-service || true
+          fi
+          
+          # Stop and remove Ollama if it was started
+          if docker ps -a | grep -q ollama-service; then
+            docker stop ollama-service || true
+            docker rm ollama-service || true
+          fi
+          
+          # Clean up network if using bridge mode
+          if [ "${{ inputs.network-mode }}" == "bridge" ] && [ -n "${{ steps.network-setup.outputs.network-name }}" ]; then
+            echo "Removing Docker network: ${{ steps.network-setup.outputs.network-name }}"
+            docker network rm "${{ steps.network-setup.outputs.network-name }}" || true
+          fi
+
+  red-teaming-aidr:
+    name: Red Teaming - With AIDR Protection
+    runs-on: ${{ inputs.runs-on }}
+    needs: [prepare-service, red-teaming-basic]
+    if: |
+      always() && 
+      (inputs.enable-red-teaming-with-aidr == true || inputs.enable-red-teaming-with-aidr == 'true') &&
+      (needs.red-teaming-basic.result == 'success' || needs.red-teaming-basic.result == 'skipped')
+    outputs:
+      scan-id: ${{ steps.run-red-teaming.outputs.scan-id }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Docker Network
+        id: network-setup
+        run: |
+          echo "::group::Setting up Docker networking"
+          
+          if [ "${{ inputs.network-mode }}" == "host" ]; then
+            echo "⚠️ Using host network mode (legacy - consider using bridge mode for better security)"
+            echo "network-arg=--network host" >> $GITHUB_OUTPUT
+            echo "backend-host=localhost" >> $GITHUB_OUTPUT
+            echo "ollama-internal-port=8001" >> $GITHUB_OUTPUT
+            echo "ollama-bind-address=0.0.0.0:8001" >> $GITHUB_OUTPUT
+          else
+            echo "✅ Using bridge network mode (recommended)"
+            # Create a unique network name to avoid conflicts
+            NETWORK_NAME="ai-testing-${{ github.run_id }}-${{ github.run_attempt }}-aidr"
+            docker network create "$NETWORK_NAME" || true
+            
+            echo "network-arg=--network $NETWORK_NAME" >> $GITHUB_OUTPUT
+            echo "network-name=$NETWORK_NAME" >> $GITHUB_OUTPUT
+            echo "backend-host=backend-service" >> $GITHUB_OUTPUT
+            echo "ollama-internal-port=11434" >> $GITHUB_OUTPUT
+            echo "ollama-bind-address=0.0.0.0" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "::endgroup::"
+      
+      - name: Login to Container Registry
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/docker-login@v1
+        with:
+          quay-username: ${{ inputs.quay-username }}
+          quay-token: ${{ secrets.QUAY_TOKEN }}
+      
+      - name: Login to Custom Registry
+        if: needs.prepare-service.outputs.use-custom-service == 'true' && inputs.service-registry != '' && inputs.service-registry-username != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.service-registry }}
+          username: ${{ inputs.service-registry-username }}
+          password: ${{ secrets.SERVICE_REGISTRY_TOKEN }}
+      
+      - name: Start Backend Service
+        id: backend-service
+        run: |
+          echo "::group::Starting backend service"
+          
+          if [ "${{ needs.prepare-service.outputs.use-custom-service }}" == "true" ]; then
+            # Start custom service
+            echo "Starting custom service..."
+            
+            # Prepare environment variables
+            # Use service-env-vars-aidr if provided, otherwise fall back to service-env-vars
+            ENV_ARGS=""
+            SERVICE_ENV_VARS="${{ inputs.service-env-vars-aidr }}"
+            if [ -z "$SERVICE_ENV_VARS" ]; then
+              SERVICE_ENV_VARS="${{ inputs.service-env-vars }}"
+              echo "Using standard service environment variables"
+            else
+              echo "Using AIDR-specific service environment variables"
+            fi
+            
+            # First, add any secrets passed via SERVICE_ENV_SECRETS_AIDR or SERVICE_ENV_SECRETS
+            # Use SERVICE_ENV_SECRETS_AIDR if provided, otherwise fall back to SERVICE_ENV_SECRETS
+            SERVICE_SECRETS='${{ secrets.SERVICE_ENV_SECRETS_AIDR }}'
+            if [ -z "$SERVICE_SECRETS" ]; then
+              SERVICE_SECRETS='${{ secrets.SERVICE_ENV_SECRETS }}'
+              if [ -n "$SERVICE_SECRETS" ]; then
+                echo "Using standard service secrets (SERVICE_ENV_SECRETS)"
+              fi
+            else
+              echo "Using AIDR-specific service secrets (SERVICE_ENV_SECRETS_AIDR)"
+            fi
+            
+            if [ -n "$SERVICE_SECRETS" ]; then
+              echo "Processing service secrets..."
+              
+              # Check if jq is available
+              if ! command -v jq &> /dev/null; then
+                echo "Warning: jq is not available, cannot parse service secrets"
+              else
+                # Create a temporary file to store the env args
+                temp_env_file=$(mktemp)
+              
+              # Parse JSON and create environment variable arguments
+              echo "$SERVICE_SECRETS" | jq -r 'to_entries | .[] | "-e \(.key)=\(.value)"' > "$temp_env_file" || {
+                echo "Warning: Failed to parse service secrets as JSON"
+                rm -f "$temp_env_file"
+              }
+              
+              # Read the arguments if file exists and has content
+              if [ -s "$temp_env_file" ]; then
+                while IFS= read -r env_arg; do
+                  ENV_ARGS="$ENV_ARGS $env_arg"
+                  # Extract and log just the variable name
+                  var_name=$(echo "$env_arg" | sed 's/-e //' | cut -d'=' -f1)
+                  echo "  Added secret: $var_name"
+                done < "$temp_env_file"
+              fi
+              
+              rm -f "$temp_env_file"
+              fi
+            fi
+            
+            # Then add regular environment variables
+            if [ -n "$SERVICE_ENV_VARS" ]; then
+              echo "Processing service environment variables..."
+              while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                # Skip comments
+                [[ "$line" =~ ^[[:space:]]*# ]] && continue
+                # Trim whitespace
+                line=$(echo "$line" | xargs)
+                [ -z "$line" ] && continue
+                # Extract variable name and value
+                var_name="${line%%=*}"
+                var_value="${line#*=}"
+                
+                # Add to docker args
+                ENV_ARGS="$ENV_ARGS -e $var_name=\"$var_value\""
+                
+                # Log only the variable name for security
+                echo "  Added: $var_name"
+              done <<< "$SERVICE_ENV_VARS"
+            fi
+            
+            # Get network configuration
+            NETWORK_ARG="${{ steps.network-setup.outputs.network-arg }}"
+            
+            # Add AIDR service URL so backend can reach it if needed
+            if [ "${{ inputs.network-mode }}" == "host" ]; then
+              AIDR_URL="http://localhost:${{ inputs.aidr-port }}"
+            else
+              AIDR_URL="http://aidr-service:8000"
+            fi
+            
+            eval "docker run -d \
+              --name backend-service \
+              $NETWORK_ARG \
+              -p ${{ inputs.service-port }}:${{ inputs.service-port }} \
+              -e AIDR_SERVICE_URL=\"$AIDR_URL\" \
+              -e AIDR_PROXY_URL=\"$AIDR_URL\" \
+              $ENV_ARGS \
+              ${{ inputs.service-docker-image }}"
+            
+            # Custom health check
+            if [ -n "${{ inputs.service-health-command }}" ]; then
+              echo "Running health check..."
+              max_attempts=30
+              attempt=0
+              while [ $attempt -lt $max_attempts ]; do
+                if eval "${{ inputs.service-health-command }}"; then
+                  echo "✅ Service is healthy"
+                  break
+                fi
+                attempt=$((attempt + 1))
+                echo "Waiting for service... (attempt $attempt/$max_attempts)"
+                sleep 2
+              done
+              
+              if [ $attempt -eq $max_attempts ]; then
+                echo "::error::Service health check failed"
+                docker logs backend-service
+                exit 1
+              fi
+            else
+              sleep 5
+            fi
+            
+            # Set backend URL based on network mode
+            if [ "${{ inputs.network-mode }}" == "host" ]; then
+              echo "backend-url=http://localhost:${{ inputs.service-port }}" >> $GITHUB_OUTPUT
+            else
+              echo "backend-url=http://backend-service:${{ inputs.service-port }}" >> $GITHUB_OUTPUT
+            fi
+          else
+            # Start Ollama
+            echo "Starting Ollama service..."
+            
+            # Get network configuration
+            NETWORK_ARG="${{ steps.network-setup.outputs.network-arg }}"
+            OLLAMA_BIND="${{ steps.network-setup.outputs.ollama-bind-address }}"
+            
+            if [ "${{ inputs.network-mode }}" == "host" ]; then
+              # Host mode: bind to specific port
+              docker run -d \
+                --name backend-service \
+                $NETWORK_ARG \
+                -e OLLAMA_HOST=$OLLAMA_BIND \
+                ollama/ollama:latest
+            else
+              # Bridge mode: use port mapping
+              docker run -d \
+                --name backend-service \
+                $NETWORK_ARG \
+                -p 8001:11434 \
+                -e OLLAMA_HOST=$OLLAMA_BIND \
+                ollama/ollama:latest
+            fi
+            
+            # Wait for Ollama
+            max_attempts=30
+            attempt=0
+            while [ $attempt -lt $max_attempts ]; do
+              if curl -s http://localhost:8001/api/tags >/dev/null 2>&1; then
+                echo "✅ Ollama is ready"
+                break
+              fi
+              attempt=$((attempt + 1))
+              echo "Waiting for Ollama... (attempt $attempt/$max_attempts)"
+              sleep 2
+            done
+            
+            if [ $attempt -eq $max_attempts ]; then
+              echo "::error::Ollama failed to start"
+              docker logs backend-service
+              exit 1
+            fi
+            
+            # Set backend URL based on network mode
+            if [ "${{ inputs.network-mode }}" == "host" ]; then
+              echo "backend-url=http://localhost:8001" >> $GITHUB_OUTPUT
+            else
+              echo "backend-url=http://backend-service:11434" >> $GITHUB_OUTPUT
+            fi
+          fi
+          
+          echo "::endgroup::"
+      
+      - name: Setup Ollama Model
+        if: needs.prepare-service.outputs.use-custom-service != 'true' && inputs.model-provider == 'ollama'
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-ollama@v1
+        with:
+          model-name: ${{ inputs.model-name }}
+          ollama-endpoint: http://localhost:8001
+      
+      - name: Start AIDR Service
+        id: aidr-service
+        run: |
+          echo "::group::Starting AIDR service"
+          
+          # Determine backend URL
+          if [ "${{ inputs.model-provider }}" == "openai" ]; then
+            BACKEND_URL="https://api.openai.com"
+            echo "Using OpenAI API backend: $BACKEND_URL"
+          elif [ "${{ inputs.model-provider }}" == "custom" ]; then
+            BACKEND_URL="${{ inputs.model-endpoint }}"
+            echo "Using custom endpoint: $BACKEND_URL"
+          else
+            # Use the backend URL from the backend service
+            BACKEND_URL="${{ steps.backend-service.outputs.backend-url }}"
+            echo "Using backend service URL: $BACKEND_URL"
+          fi
+          
+          # Prepare additional AIDR environment variables
+          AIDR_ENV_ARGS=""
+          
+          # First, process AIDR secrets from AIDR_ENV_SECRETS
+          AIDR_SECRETS='${{ secrets.AIDR_ENV_SECRETS }}'
+          if [ -n "$AIDR_SECRETS" ]; then
+            echo "Processing AIDR service secrets..."
+            
+            # Check if jq is available
+            if ! command -v jq &> /dev/null; then
+              echo "Warning: jq is not available, cannot parse AIDR secrets"
+            else
+              # Create a temporary file to store the env args
+              temp_env_file=$(mktemp)
+              
+              # Parse JSON and create environment variable arguments
+              echo "$AIDR_SECRETS" | jq -r 'to_entries | .[] | "-e \(.key)=\(.value)"' > "$temp_env_file" || {
+                echo "Warning: Failed to parse AIDR secrets as JSON"
+                rm -f "$temp_env_file"
+              }
+              
+              # Read the arguments if file exists and has content
+              if [ -s "$temp_env_file" ]; then
+                while IFS= read -r env_arg; do
+                  AIDR_ENV_ARGS="$AIDR_ENV_ARGS $env_arg"
+                  # Extract and log just the variable name
+                  var_name=$(echo "$env_arg" | sed 's/-e //' | cut -d'=' -f1)
+                  echo "  Added AIDR secret: $var_name"
+                done < "$temp_env_file"
+              fi
+              
+              rm -f "$temp_env_file"
+            fi
+          fi
+          
+          # Then process regular AIDR environment variables
+          if [ -n "${{ inputs.aidr-env-vars }}" ]; then
+            echo "Processing additional AIDR environment variables..."
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              # Skip lines that start with #
+              [[ "$line" =~ ^[[:space:]]*# ]] && continue
+              # Trim whitespace
+              line=$(echo "$line" | xargs)
+              [ -z "$line" ] && continue
+              # Extract variable name and value
+              var_name="${line%%=*}"
+              var_value="${line#*=}"
+              
+              # Add to docker args with proper escaping
+              AIDR_ENV_ARGS="$AIDR_ENV_ARGS -e \"$var_name=$var_value\""
+              
+              # Log only the variable name for security
+              echo "  Added: $var_name"
+            done <<< "${{ inputs.aidr-env-vars }}"
+          fi
+          
+          # Get network configuration
+          NETWORK_ARG="${{ steps.network-setup.outputs.network-arg }}"
+          
+          # Configure AIDR port based on network mode
+          if [ "${{ inputs.network-mode }}" == "host" ]; then
+            # Host mode: use HL_LLM_PROXY_PORT environment variable
+            AIDR_PORT_CONFIG="-e HL_LLM_PROXY_PORT=${{ inputs.aidr-port }}"
+          else
+            # Bridge mode: use standard port mapping
+            AIDR_PORT_CONFIG="-p ${{ inputs.aidr-port }}:8000"
+          fi
+          
+          eval "docker run -d \
+            --name aidr-service \
+            $NETWORK_ARG \
+            $AIDR_PORT_CONFIG \
+            -e HL_LICENSE=\"${{ secrets.HL_LICENSE_AIDR }}\" \
+            -e HL_LLM_PROXY_MLDR_CONNECTION_TYPE=hybrid \
+            -e HL_LLM_PROXY_CLIENT_ID=\"${{ inputs.hiddenlayer-client-id }}\" \
+            -e HL_LLM_PROXY_CLIENT_SECRET=\"${{ secrets.HIDDENLAYER_CLIENT_SECRET }}\" \
+            -e HL_LLM_PROXY_MLDR_BASE_URL=\"${{ inputs.hiddenlayer-api-url }}\" \
+            -e HL_LLM_PROXY_TOKEN_URL=\"${{ inputs.hiddenlayer-auth-url }}\" \
+            -e HL_LLM_PROXY_OPENAI_BASE_URL=\"$BACKEND_URL\" \
+            -e HL_LLM_PROXY_OPENAI_DEFAULT_MODEL=\"${{ inputs.model-name }}\" \
+            -e HL_LLM_PROXY_OPENAI_PROVIDER="${{ inputs.model-provider }}" \
+            -e HL_LLM_BLOCK_PROMPT_INJECTION=\"true\" \
+            -e HL_LLM_BLOCK_MESSAGE=\"I'm sorry, but I cannot assist with that request.\" \
+            -e HL_LLM_BLOCK_INPUT_PII=\"true\" \
+            -e HL_LLM_BLOCK_OUTPUT_PII=\"true\" \
+            -e HL_LLM_INCLUDE_BLOCK_MESSAGE_REASONS=\"false\" \
+            -e HL_LLM_PROXY_LOG_LEVEL=\"INFO\" \
+            $AIDR_ENV_ARGS \
+            quay.io/hiddenlayer/distro-enterprise-aidr-genai:latest"
+          
+          # Wait for AIDR to be ready
+          echo "Waiting for AIDR to start..."
+          sleep 10
+          
+          # Debug network connectivity
+          if [ "${{ inputs.network-mode }}" == "bridge" ]; then
+            echo "Debug: Network connectivity check"
+            echo "Network: ${{ steps.network-setup.outputs.network-name }}"
+            docker network inspect "${{ steps.network-setup.outputs.network-name }}" | jq -r '.Containers | to_entries[] | "\(.value.Name) - \(.value.IPv4Address)"' || true
+            
+            # Test connectivity from AIDR to backend
+            echo "Testing AIDR → Backend connectivity:"
+            docker exec aidr-service curl -s -m 5 "$BACKEND_URL" || echo "Note: Backend might not have a root endpoint, which is normal"
+          fi
+          
+          echo "::endgroup::"
+      
+      - name: Determine Target URL for AIDR
+        id: determine-url
+        run: |
+          # Use provided target-url if specified
+          if [ -n "${{ inputs.target-url }}" ]; then
+            echo "target-url=${{ inputs.target-url }}" >> $GITHUB_OUTPUT
+            echo "ℹ️ Using override target URL: ${{ inputs.target-url }}"
+          else
+            # Default to AIDR proxy endpoint
+            echo "target-url=http://localhost:${{ inputs.aidr-port }}/v1/chat/completions" >> $GITHUB_OUTPUT
+            echo "ℹ️ Using default AIDR proxy URL: http://localhost:${{ inputs.aidr-port }}/v1/chat/completions"
+          fi
+      
+      # - name: Validate Target Endpoint
+      #   uses: hiddenlayerai/hl-aisec-platform-development-workflow/validate-openai-compatible-endpoint@v1
+      #   with:
+      #     target-url: ${{ steps.determine-url.outputs.target-url }}
+      #     model-name: ${{ github.repository }}
+      
+      - name: Create Red Teaming Target
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/create-red-teaming-target@v1
+        with:
+          target-name: ${{ github.repository }}
+          target-url: ${{ steps.determine-url.outputs.target-url }}
+          client-id: ${{ inputs.hiddenlayer-client-id }}
+          client-secret: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+          api-url: ${{ inputs.hiddenlayer-api-url }}
+          auth-url: ${{ inputs.hiddenlayer-auth-url }}
+      
+      - name: Run Automated Red Teaming with AIDR
+        id: run-red-teaming
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/run-red-teaming@v1
+        with:
+          target-url: ${{ steps.determine-url.outputs.target-url }}
+          model-name: ${{ github.repository }}
+          attack-tags: ${{ inputs.attack-tags }}
+          planned-attempts: ${{ inputs.planned-attempts }}
+          license: ${{ secrets.HL_LICENSE_AUTOMATED_RED_TEAMING }}
+          client-id: ${{ inputs.hiddenlayer-client-id }}
+          client-secret: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+          api-url: ${{ inputs.hiddenlayer-api-url }}
+          auth-url: ${{ inputs.hiddenlayer-auth-url }}
+          console-url: ${{ inputs.hiddenlayer-console-url }}
+      
+      - name: Retrieve Red Teaming Artifacts
+        id: retrieve-artifacts
+        if: steps.run-red-teaming.outputs.scan-id != ''
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-red-teaming-artifacts@v1
+        with:
+          scan-id: ${{ steps.run-red-teaming.outputs.scan-id }}
+          client-id: ${{ inputs.hiddenlayer-client-id }}
+          client-secret: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+          auth-url: ${{ inputs.hiddenlayer-auth-url }}
+          api-url: ${{ inputs.hiddenlayer-api-url }}
+          output-file: red-teaming-aidr-artifacts.zip
+          extract-files: 'true'
+      
+      - name: Upload Red Teaming Artifacts
+        if: steps.retrieve-artifacts.outputs.artifacts-file != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: red-teaming-aidr-artifacts
+          path: |
+            ${{ steps.retrieve-artifacts.outputs.artifacts-file }}
+            ${{ steps.retrieve-artifacts.outputs.artifacts-dir }}/**/*.csv
+          if-no-files-found: warn
+      
+      - name: Capture Docker Logs
+        if: always()
+        run: |
+          echo "::group::Docker Container Logs"
+          
+          # Show all containers status
+          echo "🐳 Container Status:"
+          echo "==================="
+          docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Image}}" | grep -E "(backend-service|aidr-service|NAMES)" || true
+          echo ""
+          
+          # Capture backend service logs
+          if docker ps -a | grep -q backend-service; then
+            echo "📋 Backend Service Logs (last 200 lines):"
+            echo "========================================"
+            docker logs --tail 200 backend-service 2>&1 || echo "Failed to retrieve backend service logs"
+            echo ""
+          fi
+          
+          # Capture AIDR service logs
+          if docker ps -a | grep -q aidr-service; then
+            echo "📋 AIDR Service Logs (last 200 lines):"
+            echo "====================================="
+            docker logs --tail 200 aidr-service 2>&1 || echo "Failed to retrieve AIDR service logs"
+            echo ""
+          fi
+          
+          echo "::endgroup::"
+      
+      - name: Cleanup Services
+        if: always()
+        run: |
+          # Stop and remove services
+          docker stop aidr-service || true
+          docker rm aidr-service || true
+          docker stop backend-service || true
+          docker rm backend-service || true
+          
+          # Clean up network if using bridge mode
+          if [ "${{ inputs.network-mode }}" == "bridge" ] && [ -n "${{ steps.network-setup.outputs.network-name }}" ]; then
+            echo "Removing Docker network: ${{ steps.network-setup.outputs.network-name }}"
+            docker network rm "${{ steps.network-setup.outputs.network-name }}" || true
+          fi
+
+  report:
+    name: Generate Red Teaming Report
+    runs-on: ${{ inputs.runs-on }}
+    needs: [prepare-service, red-teaming-basic, red-teaming-aidr]
+    if: |
+      always() && 
+      (needs.red-teaming-basic.result == 'success' || needs.red-teaming-basic.result == 'skipped') &&
+      (needs.red-teaming-aidr.result == 'success' || needs.red-teaming-aidr.result == 'skipped') &&
+      (needs.red-teaming-basic.result != 'skipped' || needs.red-teaming-aidr.result != 'skipped')
+    outputs:
+      total-findings: ${{ steps.combine-reports.outputs.total-findings }}
+      report-summary: ${{ steps.combine-reports.outputs.summary }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Generate Basic Report
+        id: report-basic
+        if: needs.red-teaming-basic.result != 'skipped'
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/red-teaming-report@v1
+        with:
+          scan-id: ${{ needs.red-teaming-basic.outputs.scan-id }}
+          client-id: ${{ inputs.hiddenlayer-client-id }}
+          client-secret: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+          auth-url: ${{ inputs.hiddenlayer-auth-url }}
+          api-url: ${{ inputs.hiddenlayer-api-url }}
+          console-url: ${{ inputs.hiddenlayer-console-url }}
+          scan-type: 'Basic'
+          model-name: ${{ inputs.model-name }}
+          output-format: summary
+      
+      - name: Generate AIDR Report
+        id: report-aidr
+        if: needs.red-teaming-aidr.result != 'skipped'
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/red-teaming-report@v1
+        with:
+          scan-id: ${{ needs.red-teaming-aidr.outputs.scan-id }}
+          client-id: ${{ inputs.hiddenlayer-client-id }}
+          client-secret: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+          auth-url: ${{ inputs.hiddenlayer-auth-url }}
+          api-url: ${{ inputs.hiddenlayer-api-url }}
+          console-url: ${{ inputs.hiddenlayer-console-url }}
+          scan-type: 'AIDR-Protected'
+          model-name: ${{ inputs.model-name }}
+          output-format: summary
+      
+      - name: Combine Reports
+        id: combine-reports
+        run: |
+          # Combine findings from both reports
+          basic_findings="${{ steps.report-basic.outputs.total-findings || '0' }}"
+          aidr_findings="${{ steps.report-aidr.outputs.total-findings || '0' }}"
+          
+          # Determine which mode we're in
+          basic_enabled="${{ inputs.enable-basic-red-teaming }}"
+          aidr_enabled="${{ inputs.enable-red-teaming-with-aidr }}"
+          
+          # Generate summary based on mode
+          if [ "$basic_enabled" == "true" ] && [ "$aidr_enabled" == "true" ]; then
+            total_findings=$((basic_findings + aidr_findings))
+            echo "total-findings=$total_findings" >> $GITHUB_OUTPUT
+            
+            summary="**Basic Testing:** "
+            if [ "$basic_findings" -gt 0 ]; then
+              summary+="Found $basic_findings vulnerabilities. "
+            else
+              summary+="No vulnerabilities detected. "
+            fi
+            
+            summary+="**AIDR-Protected:** "
+            if [ "$aidr_findings" -gt 0 ]; then
+              if [ "$basic_findings" -gt 0 ]; then
+                reduction=$((100 - (aidr_findings * 100 / basic_findings)))
+                summary+="Found $aidr_findings vulnerabilities (AIDR effectiveness: ${reduction}% reduction)"
+              else
+                summary+="Found $aidr_findings vulnerabilities"
+              fi
+            else
+              summary+="All attacks blocked by AIDR"
+            fi
+            
+            echo "summary=$summary" >> $GITHUB_OUTPUT
+          elif [ "$basic_enabled" == "true" ] && [ "$aidr_enabled" != "true" ]; then
+            echo "total-findings=$basic_findings" >> $GITHUB_OUTPUT
+            if [ "$basic_findings" -gt 0 ]; then
+              echo "summary=Found $basic_findings vulnerabilities in basic testing" >> $GITHUB_OUTPUT
+            else
+              echo "summary=No vulnerabilities detected in basic testing" >> $GITHUB_OUTPUT
+            fi
+          elif [ "$basic_enabled" != "true" ] && [ "$aidr_enabled" == "true" ]; then
+            echo "total-findings=$aidr_findings" >> $GITHUB_OUTPUT
+            if [ "$aidr_findings" -gt 0 ]; then
+              echo "summary=Found $aidr_findings vulnerabilities with AIDR protection enabled" >> $GITHUB_OUTPUT
+            else
+              echo "summary=No vulnerabilities detected - AIDR blocked all attacks" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "total-findings=0" >> $GITHUB_OUTPUT
+            echo "summary=No red teaming tests were run" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: consolidated-artifacts
+      
+      - name: Create Consolidated Report
+        run: |
+          # Create a summary file
+          echo "# Red Teaming Consolidated Report" > consolidated-artifacts/SUMMARY.md
+          echo "**Date:** $(date)" >> consolidated-artifacts/SUMMARY.md
+          echo "**Model:** ${{ inputs.model-name }}" >> consolidated-artifacts/SUMMARY.md
+          echo "**Testing Mode:** ${{ inputs.enable-basic-red-teaming && inputs.enable-red-teaming-with-aidr && 'Basic + AIDR-Protected' ||
+              inputs.enable-basic-red-teaming && 'Basic' ||
+              inputs.enable-red-teaming-with-aidr && 'AIDR-Protected' || 'None' }}" >> consolidated-artifacts/SUMMARY.md
+          echo "" >> consolidated-artifacts/SUMMARY.md
+          echo "## Summary" >> consolidated-artifacts/SUMMARY.md
+          echo "${{ steps.combine-reports.outputs.summary }}" >> consolidated-artifacts/SUMMARY.md
+          echo "" >> consolidated-artifacts/SUMMARY.md
+          echo "## Artifacts" >> consolidated-artifacts/SUMMARY.md
+          find consolidated-artifacts -name "*.csv" -type f | while read -r file; do
+            echo "- $(basename "$file")" >> consolidated-artifacts/SUMMARY.md
+          done
+          
+          # Create action summary
+          echo "## 🎯 Red Teaming Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Model:** ${{ inputs.model-name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Testing Mode:** ${{ inputs.enable-basic-red-teaming && inputs.enable-red-teaming-with-aidr && 'Basic + AIDR-Protected' ||
+              inputs.enable-basic-red-teaming && 'Basic' ||
+              inputs.enable-red-teaming-with-aidr && 'AIDR-Protected' || 'None' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Results Summary" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.combine-reports.outputs.summary }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 📎 Available Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.red-teaming-basic.result }}" != "skipped" ]; then
+            echo "**Basic Testing:**" >> $GITHUB_STEP_SUMMARY
+            echo "- 📄 [Download ZIP with CSV Reports](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#:~:text=red-teaming-basic-artifacts)" >> $GITHUB_STEP_SUMMARY
+            echo "  - Contains attack prompts, responses, and detection results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ needs.red-teaming-aidr.result }}" != "skipped" ]; then
+            echo "**AIDR-Protected Testing:**" >> $GITHUB_STEP_SUMMARY
+            echo "- 📄 [Download ZIP with CSV Reports](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#:~:text=red-teaming-aidr-artifacts)" >> $GITHUB_STEP_SUMMARY
+            echo "  - Contains attack prompts, responses, and detection results with AIDR protection" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "**Consolidated Report:**" >> $GITHUB_STEP_SUMMARY
+          echo "- 📊 [Download All Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#:~:text=red-teaming-consolidated-report)" >> $GITHUB_STEP_SUMMARY
+          echo "  - Includes summary and all CSV files from both test runs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 🔗 Additional Resources" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.red-teaming-basic.result }}" != "skipped" ]; then
+            echo "- [View Basic Testing in HiddenLayer Console](${{ inputs.hiddenlayer-console-url }}/automated-red-teaming?activeTab=reports&target_name=${{ github.repository }})" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ "${{ needs.red-teaming-aidr.result }}" != "skipped" ]; then
+            echo "- [View AIDR Testing in HiddenLayer Console](${{ inputs.hiddenlayer-console-url }}/automated-red-teaming?activeTab=reports&target_name=${{ github.repository }})" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "*Note: CSV artifacts may not be available if download from HiddenLayer platform failed. Check workflow logs for details.*" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Upload Consolidated Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: red-teaming-consolidated-report
+          path: consolidated-artifacts/**
+          if-no-files-found: warn
+      
+      - name: Create PR Comment
+        if: github.event_name == 'pull_request' && inputs.create-pr-comment != 'false'
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/pr-comment@v1
+        with:
+          comment-identifier: 'hiddenlayer-red-teaming-report'
+          comment-body: |
+            # 🎯 Red Teaming Report
+            
+            ## Summary
+            **Model:** ${{ inputs.model-name }}  
+            **Testing Mode:** ${{ inputs.enable-basic-red-teaming && inputs.enable-red-teaming-with-aidr && 'Basic + AIDR-Protected' ||
+                inputs.enable-basic-red-teaming && 'Basic' ||
+                inputs.enable-red-teaming-with-aidr && 'AIDR-Protected' || 'None' }}
+            
+            ${{ steps.combine-reports.outputs.summary }}
+            
+            ## Results
+            
+            ${{ needs.red-teaming-basic.result != 'skipped' && format('### Basic Testing
+            {0}
+            
+            [View detailed report →]({1}/automated-red-teaming?activeTab=reports&target_name={2})', steps.report-basic.outputs.report-markdown, inputs.hiddenlayer-console-url, github.repository) || '' }}
+            
+            ${{ needs.red-teaming-aidr.result != 'skipped' && format('### AIDR-Protected Testing
+            {0}
+            
+            [View detailed report →]({1}/automated-red-teaming?activeTab=reports&target_name={2})', steps.report-aidr.outputs.report-markdown, inputs.hiddenlayer-console-url, github.repository) || '' }}
+            
+            ## 📎 Artifacts
+            
+            ### Available Downloads:
+            ${{ needs.red-teaming-basic.result != 'skipped' && '- 📄 [Basic Testing Results (ZIP with CSVs)](https://github.com/' || '' }}${{ needs.red-teaming-basic.result != 'skipped' && github.repository || '' }}${{ needs.red-teaming-basic.result != 'skipped' && '/actions/runs/' || '' }}${{ needs.red-teaming-basic.result != 'skipped' && github.run_id || '' }}${{ needs.red-teaming-basic.result != 'skipped' && '#:~:text=red-teaming-basic-artifacts)' || '' }}
+            ${{ needs.red-teaming-aidr.result != 'skipped' && '- 📄 [AIDR Testing Results (ZIP with CSVs)](https://github.com/' || '' }}${{ needs.red-teaming-aidr.result != 'skipped' && github.repository || '' }}${{ needs.red-teaming-aidr.result != 'skipped' && '/actions/runs/' || '' }}${{ needs.red-teaming-aidr.result != 'skipped' && github.run_id || '' }}${{ needs.red-teaming-aidr.result != 'skipped' && '#:~:text=red-teaming-aidr-artifacts)' || '' }}
+            - 📊 [Consolidated Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#:~:text=red-teaming-consolidated-report)
+            
+            The ZIP files contain detailed CSV reports with:
+            - Attack prompts and model responses
+            - Detection results and classifications
+            - Vulnerability categories and severities
+            
+            ---
+            *Red teaming performed on: ${{ inputs.model-name }}*  
+            *View all artifacts in the [workflow artifacts](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+            
+            <sub>Note: CSV artifacts may not be available if download from HiddenLayer platform failed.</sub> 

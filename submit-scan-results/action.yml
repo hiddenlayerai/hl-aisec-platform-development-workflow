@@ -1,0 +1,209 @@
+name: 'Submit Scan Results to HiddenLayer'
+description: 'Submits scan results to HiddenLayer API'
+inputs:
+  scan-results-file:
+    description: 'Path to scan results JSON file'
+    required: true
+  client-id:
+    description: 'HiddenLayer Client ID'
+    required: true
+  client-secret:
+    description: 'HiddenLayer Client Secret'
+    required: true
+  auth-url:
+    description: 'HiddenLayer Auth URL'
+    required: false
+    default: 'https://auth.hiddenlayer.ai'
+  api-url:
+    description: 'HiddenLayer API URL'
+    required: false
+    default: 'https://api.us.hiddenlayer.ai'
+  console-url:
+    description: 'HiddenLayer Console URL'
+    required: false
+    default: 'https://console.us.hiddenlayer.ai'
+  model-name:
+    description: 'Model name'
+    required: true
+  model-version:
+    description: 'Model version'
+    required: true
+  origin:
+    description: 'Model origin (e.g., Github, Hugging Face)'
+    required: false
+    default: 'Github'
+  requesting-entity:
+    description: 'Entity requesting the scan'
+    required: false
+    default: '${{ github.actor }}'
+outputs:
+  model-id:
+    description: 'Model ID in HiddenLayer platform'
+    value: ${{ steps.query-model.outputs.model-id }}
+  scan-id:
+    description: 'Scan ID in HiddenLayer platform'
+    value: ${{ steps.parse-results.outputs.scan-id }}
+  console-url:
+    description: 'URL to view results in HiddenLayer console'
+    value: ${{ steps.submit.outputs.console-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests
+    
+    - name: Parse scan results
+      id: parse-results
+      shell: bash
+      run: |
+        # Extract scan ID from results
+        scan_id=$(jq -r '.scan_id' ${{ inputs.scan-results-file }})
+        echo "scan-id=$scan_id" >> $GITHUB_OUTPUT
+    
+    - name: Submit Results
+      id: submit
+      shell: bash
+      env:
+        CLIENT_ID: ${{ inputs.client-id }}
+        CLIENT_SECRET: ${{ inputs.client-secret }}
+        AUTH_URL: ${{ inputs.auth-url }}
+        API_URL: ${{ inputs.api-url }}
+        CONSOLE_URL: ${{ inputs.console-url }}
+        MODEL_NAME: ${{ inputs.model-name }}
+        MODEL_VERSION: ${{ inputs.model-version }}
+        ORIGIN: ${{ inputs.origin }}
+        REQUESTING_ENTITY: ${{ inputs.requesting-entity }}
+        SCAN_RESULTS_FILE: ${{ inputs.scan-results-file }}
+      run: |
+        echo "::group::Submitting scan results to HiddenLayer"
+        
+        # Create Python script for submission
+        cat > submit_results.py << 'EOF'
+        import json
+        import requests
+        import base64
+        import sys
+        import os
+        
+        # First authenticate to get access token
+        auth_url = os.environ['AUTH_URL']
+        client_id = os.environ['CLIENT_ID']
+        client_secret = os.environ['CLIENT_SECRET']
+        
+        print(f"Authenticating with HiddenLayer at {auth_url}")
+        
+        # Make authentication request
+        auth_response = requests.post(
+            f"{auth_url}/oauth2/token?grant_type=client_credentials",
+            auth=(client_id, client_secret)
+        )
+        
+        if auth_response.status_code != 200:
+            print(f"❌ Authentication failed with status: {auth_response.status_code}")
+            print(f"Response: {auth_response.text}")
+            sys.exit(1)
+        
+        # Extract access token
+        auth_data = auth_response.json()
+        token = auth_data.get('access_token')
+        
+        if not token:
+            print("❌ Failed to extract access token from authentication response")
+            print(f"Response: {auth_data}")
+            sys.exit(1)
+        
+        print("✅ Successfully authenticated with HiddenLayer")
+        
+        # Load scan results
+        with open(os.environ['SCAN_RESULTS_FILE'], 'r') as f:
+            payload = json.load(f)
+        
+        # Remove existing IDs if present
+        if 'inventory' in payload:
+            payload['inventory'].pop('model_id', None)
+            payload['inventory'].pop('model_version_id', None)
+            
+            # Update payload fields
+            payload['inventory']['model_name'] = os.environ['MODEL_NAME']
+            payload['inventory']['model_version'] = os.environ['MODEL_VERSION']
+            payload['inventory']['request_source'] = 'Integration'
+            payload['inventory']['origin'] = os.environ['ORIGIN']
+            payload['inventory']['requesting_entity'] = os.environ['REQUESTING_ENTITY']
+        
+        # Submit to API
+        scan_id = payload.get('scan_id')
+        headers = {'Authorization': f'Bearer {token}'}
+        
+        api_url = os.environ['API_URL']
+        print(f"Submitting to: {api_url}/scan/v3/results/{scan_id}")
+        
+        response = requests.post(
+            f'{api_url}/scan/v3/results/{scan_id}',
+            json=payload,
+            headers=headers
+        )
+        
+        if response.status_code == 201:
+            print("✅ Scan results submitted successfully!")
+        else:
+            print(f"❌ Failed to submit scan results. Status: {response.status_code}")
+            print(f"Response: {response.text}")
+            
+            sys.exit(1)
+        
+        # Get model ID
+        model_query = {
+            "filter": {"plaintext_name": os.environ['MODEL_NAME']}
+        }
+        
+        model_response = requests.post(
+            f'{api_url}/api/v2/sensors/query',
+            json=model_query,
+            headers=headers
+        )
+        
+        if model_response.status_code == 200:
+            results = model_response.json().get('results', [])
+            if results:
+                model_id = results[0].get('model_id')
+                print(f"Model ID: {model_id}")
+                with open('outputs.txt', 'w') as f:
+                    f.write(f"model-id={model_id}\n")
+                    f.write(f"scan-id={scan_id}\n")
+            else:
+                print("Warning: Could not find model ID")
+                with open('outputs.txt', 'w') as f:
+                    f.write(f"model-id=\n")
+                    f.write(f"scan-id={scan_id}\n")
+        EOF
+        
+        # Run submission script
+        python submit_results.py
+        
+        # Read outputs
+        if [ -f outputs.txt ]; then
+          while IFS= read -r line; do
+            echo "$line" >> $GITHUB_OUTPUT
+          done < outputs.txt
+          
+          # Extract values for console URL
+          model_id=$(grep "model-id=" outputs.txt | cut -d'=' -f2)
+          scan_id=$(grep "scan-id=" outputs.txt | cut -d'=' -f2)
+          
+          if [ -n "$model_id" ] && [ -n "$scan_id" ]; then
+            console_url="${{ inputs.console-url }}/model-details/$model_id/scans/$scan_id"
+            echo "console-url=$console_url" >> $GITHUB_OUTPUT
+            echo "::notice title=View scan results::$console_url"
+          fi
+        fi
+        
+        echo "::endgroup::" 

@@ -1,0 +1,47 @@
+name: Example - OpenAI with AIDR Protection
+
+on:
+  workflow_dispatch:
+
+jobs:
+  red-team-openai:
+    uses: ./.github/workflows/automated-red-teaming.yml
+    with:
+      # Model configuration for OpenAI
+      model-name: "gpt-3.5-turbo"
+      model-provider: "openai"
+      
+      # AIDR configuration (non-secret)
+      aidr-env-vars: |
+        # Configure AIDR protections
+        HL_LLM_BLOCK_JAILBREAK=true
+        HL_LLM_BLOCK_HARMFUL_CONTENT=true
+        HL_LLM_CONFIDENCE_THRESHOLD=0.7
+        HL_LLM_LOG_LEVEL=info
+      
+      # Red teaming configuration
+      enable-basic-red-teaming: false
+      enable-red-teaming-with-aidr: true
+      attack-tags: "hl-owasp-top-10-for-llm"
+      planned-attempts: 10
+      
+      # HiddenLayer platform configuration
+      hiddenlayer-client-id: ${{ vars.HIDDENLAYER_CLIENT_ID }}
+      hiddenlayer-api-url: ${{ vars.HIDDENLAYER_API_URL || 'https://api.hiddenlayer.ai' }}
+      hiddenlayer-auth-url: ${{ vars.HIDDENLAYER_AUTH_URL || 'https://auth.hiddenlayer.com/oauth2/token' }}
+      hiddenlayer-console-url: ${{ vars.HIDDENLAYER_CONSOLE_URL || 'https://console.hiddenlayer.com' }}
+      quay-username: ${{ vars.QUAY_USERNAME }}
+      
+    secrets:
+      # Required HiddenLayer secrets
+      HIDDENLAYER_CLIENT_SECRET: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+      HL_LICENSE_AUTOMATED_RED_TEAMING: ${{ secrets.HL_LICENSE_AUTOMATED_RED_TEAMING }}
+      HL_LICENSE_AIDR: ${{ secrets.HL_LICENSE_AIDR }}
+      
+      # OpenAI API key for AIDR service
+      # Make sure to set OPENAI_API_KEY as a repository secret
+      AIDR_ENV_SECRETS: |
+        {
+          "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}"
+        } 

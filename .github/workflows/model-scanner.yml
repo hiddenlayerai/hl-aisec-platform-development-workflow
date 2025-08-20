@@ -1,0 +1,913 @@
+name: HiddenLayer Model Scanner v2
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner to execute the workflow on"
+        required: false
+        default: "ubuntu-latest"
+        type: string
+      
+      # HiddenLayer Configuration
+      hiddenlayer-client-id:
+        description: "HiddenLayer Client ID"
+        required: false
+        type: string
+      hiddenlayer-api-url:
+        description: "HiddenLayer API URL"
+        required: false
+        default: "https://api.us.hiddenlayer.ai"
+        type: string
+      hiddenlayer-auth-url:
+        description: "HiddenLayer Auth URL"
+        required: false
+        default: "https://auth.hiddenlayer.ai"
+        type: string
+      hiddenlayer-console-url:
+        description: "HiddenLayer Console URL"
+        required: false
+        default: "https://console.us.hiddenlayer.ai"
+        type: string
+      
+      # Scanner Configuration
+      model-scanner-version:
+        description: 'Model Scanner Version Tag'
+        required: false
+        type: string
+        default: '25.5.1'
+      enforce-scan-detections:
+        description: "Fail workflow if detections are found"
+        required: false
+        default: "false"
+        type: string
+      create-pr-comment:
+        description: "Create PR comment with results"
+        required: false
+        default: "true"
+        type: string
+      
+      # Container Registry
+      quay-username:
+        description: "Quay.io username"
+        required: true
+        type: string
+    
+    outputs:
+      scan-id:
+        description: 'HiddenLayer scan ID'
+        value: ${{ jobs.scan-repository.outputs.scan-id }}
+      model-id:
+        description: 'HiddenLayer model ID'
+        value: ${{ jobs.scan-repository.outputs.model-id }}
+      detections-found:
+        description: 'Whether detections were found in any scan'
+        value: ${{ jobs.summary.outputs.aggregated-detections-found || jobs.scan-repository.outputs.detections-found }}
+      detection-summary:
+        description: 'Summary of detections from all scans'
+        value: ${{ jobs.summary.outputs.aggregated-detection-summary || jobs.scan-repository.outputs.detection-summary }}
+    
+    secrets:
+      HIDDENLAYER_CLIENT_SECRET:
+        description: "HiddenLayer Client Secret"
+        required: false
+      QUAY_TOKEN:
+        description: "Quay.io token"
+        required: true
+      HL_LICENSE_MODELSCANNER:
+        description: "HiddenLayer Model Scanner License"
+        required: true
+
+jobs:
+  extract-models:
+    name: Scan For AI Usage
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      huggingface-repos: ${{ steps.extract.outputs.repos }}
+      has-huggingface: ${{ steps.extract.outputs.has-repos }}
+      ai-assets-summary: ${{ steps.scan.outputs.summary }}
+      models-found-count: ${{ steps.scan.outputs.models-found }}
+      ai-assets: ${{ steps.scan.outputs.ai-assets }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Scan for AI models
+        id: scan
+        uses: hiddenlayerai/hl-scai@main
+        with:
+          directory: .
+          output-file: ai-scan-results.json
+      
+      - name: Extract External Models
+        id: extract
+        run: |
+          echo "::group::Extracting HuggingFace repositories from AI scan results"
+          
+          # First, let's see what the AI scan found
+          echo "AI scan results summary:"
+          jq '.usage' ai-scan-results.json || echo "No usage data"
+          echo ""
+          
+          # Parse the hl-scai output to extract HuggingFace models
+          python3 << 'EOF'
+          import json
+          import sys
+          
+          try:
+              with open('ai-scan-results.json', 'r') as f:
+                  scan_results = json.load(f)
+              
+              # Debug: Print structure
+              print("=== Debug: AI Assets ===")
+              for i, asset in enumerate(scan_results.get('ai_assets', [])):
+                  metadata = asset.get('metadata', {})
+                  print(f"Asset {i}: name={metadata.get('name')}, source={metadata.get('source')}, provider={metadata.get('provider')}")
+              
+              print("\n=== Debug: AST Scanner Results ===")
+              for file_path, file_data in scan_results.get('ast_scanner', {}).items():
+                  print(f"File: {file_path}")
+                  for result in file_data.get('results', []):
+                      print(f"  - name={result.get('name')}, source={result.get('source')}, usage={result.get('usage')}")
+              
+              # Extract unique HuggingFace repositories
+              huggingface_repos = set()
+              
+              # Check ai_assets for HuggingFace models
+              for asset in scan_results.get('ai_assets', []):
+                  metadata = asset.get('metadata', {})
+                  provider = metadata.get('provider', {})
+                  
+                  # Check if this is a HuggingFace model
+                  if (provider.get('name', '').lower() == 'huggingface' or 
+                      metadata.get('source', '').lower() == 'huggingface'):
+                      model_name = metadata.get('name', '')
+                      if model_name:
+                          # Handle both org/model and plain model formats
+                          if '/' in model_name:
+                              huggingface_repos.add(model_name)
+                          else:
+                              # For models without org, they might still be valid HF models
+                              huggingface_repos.add(model_name)
+              
+              # Also check raw AST scanner results for any missed HF references
+              for file_path, file_data in scan_results.get('ast_scanner', {}).items():
+                  for result in file_data.get('results', []):
+                      # Check for HuggingFace-specific patterns
+                      source = result.get('source', '').lower()
+                      name = result.get('name', '')
+                      
+                      if source == 'huggingface' and name:
+                          huggingface_repos.add(name)
+                      elif 'from_pretrained' in str(result.get('usage', '')):
+                          # This might be a HuggingFace model usage
+                          if name and not name.startswith('http'):
+                              huggingface_repos.add(name)
+                      elif 'pipeline' in str(result.get('usage', '')):
+                          # Pipeline models are often HuggingFace models
+                          if name and not name.startswith('http'):
+                              huggingface_repos.add(name)
+              
+              # Write results
+              repos_list = sorted(list(huggingface_repos))
+              
+              print(f"\n=== Extracted HuggingFace Models ===")
+              if repos_list:
+                  with open('hf_repos.json', 'w') as f:
+                      json.dump(repos_list, f)
+                  print(f"Found {len(repos_list)} HuggingFace repositories:")
+                  for repo in repos_list:
+                      print(f"  - {repo}")
+              else:
+                  with open('hf_repos.json', 'w') as f:
+                      json.dump([], f)
+                  print("No HuggingFace repositories found")
+              
+          except Exception as e:
+              print(f"Error processing scan results: {e}", file=sys.stderr)
+              import traceback
+              traceback.print_exc()
+              # Write empty result on error
+              with open('hf_repos.json', 'w') as f:
+                  json.dump([], f)
+              sys.exit(1)
+          EOF
+          
+          echo "::endgroup::"
+          
+          # Read the extracted repositories
+          if [ -f hf_repos.json ]; then
+            repos=$(cat hf_repos.json)
+            repo_count=$(echo "$repos" | jq 'length')
+            
+            if [ "$repo_count" -gt 0 ]; then
+              echo "repos=$repos" >> $GITHUB_OUTPUT
+              echo "has-repos=true" >> $GITHUB_OUTPUT
+              echo "::notice::Found $repo_count HuggingFace repositories: $repos"
+            else
+              echo "repos=[]" >> $GITHUB_OUTPUT
+              echo "has-repos=false" >> $GITHUB_OUTPUT
+              echo "::notice::No HuggingFace repositories found in codebase"
+            fi
+          else
+            echo "::error::Failed to extract HuggingFace repositories"
+            echo "repos=[]" >> $GITHUB_OUTPUT
+            echo "has-repos=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Upload AI scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-scan-results
+          path: |
+            ai-scan-results.json
+            hf_repos.json
+          if-no-files-found: warn
+
+  scan-repository:
+    name: Scan Current Repository Artifacts
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      scan-results: ${{ steps.scan.outputs.scan-results }}
+      detections-found: ${{ steps.scan.outputs.detections-found }}
+      detection-summary: ${{ steps.analyze.outputs.detection-summary }}
+      scan-id: ${{ steps.submit.outputs.scan-id }}
+      model-id: ${{ steps.submit.outputs.model-id }}
+    steps:
+      - name: Check credentials
+        id: check-creds
+        run: |
+          if [[ -n "${{ inputs.hiddenlayer-client-id }}" && -n "${{ secrets.HIDDENLAYER_CLIENT_SECRET }}" ]]; then
+            echo "should-submit=true" >> $GITHUB_OUTPUT
+            echo "::notice::HiddenLayer credentials provided - will submit results to platform"
+          else
+            echo "should-submit=false" >> $GITHUB_OUTPUT
+            echo "::warning::HiddenLayer credentials not provided - scan results will not be submitted to platform"
+          fi
+      
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+      
+      - name: Login to Container Registry
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/docker-login@v1
+        with:
+          quay-username: ${{ inputs.quay-username }}
+          quay-token: ${{ secrets.QUAY_TOKEN }}
+      
+      - name: Scan repository
+        id: scan
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/model-scanner@v1
+        with:
+          scan-path: ${{ github.workspace }}
+          model-scanner-version: ${{ inputs.model-scanner-version }}
+          license: ${{ secrets.HL_LICENSE_MODELSCANNER }}
+          output-file: repo_scan_results.json
+      
+      - name: Analyze scan results
+        id: analyze
+        run: |
+          # Parse scan results for summary
+          if [ -f repo_scan_results.json ]; then
+            # Count detections - try file_results first, then root-level detection_count
+            detection_count=0
+            
+            if jq -e '.file_results' repo_scan_results.json >/dev/null 2>&1; then
+              detection_count=$(jq '[.file_results[]?.detections? | length] | add // 0' repo_scan_results.json)
+            fi
+            
+            if [ "$detection_count" -eq 0 ] && jq -e '.detection_count' repo_scan_results.json >/dev/null 2>&1; then
+              detection_count=$(jq '.detection_count // 0' repo_scan_results.json)
+            fi
+            
+            if [ "$detection_count" -gt 0 ]; then
+              categories=$(jq -r '.file_results[]?.detections[]?.category' repo_scan_results.json 2>/dev/null | sort | uniq -c | awk '{print $2 " (" $1 ")"}' | paste -sd ", " - || echo "Unable to parse categories")
+              echo "detection-summary=Found $detection_count detections: $categories" >> $GITHUB_OUTPUT
+            else
+              echo "detection-summary=No security issues detected" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "detection-summary=Scan results not found" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Submit scan results
+        id: submit
+        if: steps.check-creds.outputs.should-submit == 'true'
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/submit-scan-results@v1
+        with:
+          scan-results-file: repo_scan_results.json
+          client-id: ${{ inputs.hiddenlayer-client-id }}
+          client-secret: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+          auth-url: ${{ inputs.hiddenlayer-auth-url }}
+          api-url: ${{ inputs.hiddenlayer-api-url }}
+          console-url: ${{ inputs.hiddenlayer-console-url }}
+          model-name: ${{ github.repository }}
+          model-version: ${{ github.sha }}
+          origin: 'Github'
+      
+      - name: Retrieve SARIF Results
+        id: sarif
+        if: steps.check-creds.outputs.should-submit == 'true' && steps.submit.outputs.scan-id != ''
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-sarif-results@v1
+        with:
+          scan-id: ${{ steps.submit.outputs.scan-id }}
+          client-id: ${{ inputs.hiddenlayer-client-id }}
+          client-secret: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+          auth-url: ${{ inputs.hiddenlayer-auth-url }}
+          api-url: ${{ inputs.hiddenlayer-api-url }}
+          output-file: repo-scan-results.sarif
+      
+      - name: Retrieve AIBOM Results
+        id: aibom
+        if: steps.check-creds.outputs.should-submit == 'true' && steps.submit.outputs.scan-id != ''
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-aibom-results@v1
+        with:
+          scan-id: ${{ steps.submit.outputs.scan-id }}
+          client-id: ${{ inputs.hiddenlayer-client-id }}
+          client-secret: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+          auth-url: ${{ inputs.hiddenlayer-auth-url }}
+          api-url: ${{ inputs.hiddenlayer-api-url }}
+          output-file: repo-aibom.cdx.json
+      
+      - name: Upload SARIF to GitHub Security
+        id: upload-sarif
+        if: steps.sarif.outputs.sarif-file != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.sarif.outputs.sarif-file }}
+          category: hiddenlayer-model-scanner-repo
+        continue-on-error: true
+      
+      - name: Check SARIF Upload Status
+        if: steps.sarif.outputs.sarif-file != '' && always()
+        run: |
+          if [ "${{ steps.upload-sarif.outcome }}" == "success" ]; then
+            echo "✅ SARIF file successfully uploaded to GitHub Security tab"
+          else
+            echo "::warning::SARIF upload failed. This may be due to:"
+            echo "::warning::  - Code scanning not being enabled for this repository"
+            echo "::warning::  - Insufficient permissions to upload SARIF results"
+            echo "::warning::  - Network or service issues"
+            echo "::warning::You can still download the SARIF file from the workflow artifacts"
+          fi
+      
+      - name: Upload scan artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repository-scan-results
+          path: |
+            repo_scan_results.json
+            repo-scan-results.sarif
+            repo-aibom.cdx.json
+          if-no-files-found: warn
+      
+      - name: Check HiddenLayer ignores
+        id: check-ignores
+        if: inputs.enforce-scan-detections == 'true' && steps.scan.outputs.detections-found == 'true'
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/check-hiddenlayer-ignores@v1
+        with:
+          scan-results-file: repo_scan_results.json
+          hiddenlayer-file: .hiddenlayer
+      
+      - name: Set job outputs
+        if: always()
+        run: |
+          # Ensure outputs are always set, even if enforcement fails
+          echo "::notice::Setting job outputs - detections found: ${{ steps.scan.outputs.detections-found }}"
+          echo "::notice::Detection summary: ${{ steps.analyze.outputs.detection-summary }}"
+      
+      - name: Enforce scan detections
+        if: inputs.enforce-scan-detections == 'true' && steps.check-ignores.outputs.has-actionable-detections == 'true'
+        run: |
+          echo "::error::Security vulnerabilities detected in repository scan that are not ignored or have expired ignores"
+          echo "::error::Actionable rule IDs: ${{ steps.check-ignores.outputs.actionable-rule-ids }}"
+          exit 1
+
+  scan-external-models:
+    name: Scan External Model
+    runs-on: ${{ inputs.runs-on }}
+    needs: [extract-models]
+    if: needs.extract-models.outputs.has-huggingface == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 1  # Run one at a time to avoid rate limits and resource conflicts
+      matrix:
+        repository: ${{ fromJson(needs.extract-models.outputs.huggingface-repos) }}
+    steps:
+      - name: Check credentials
+        id: check-creds
+        run: |
+          if [[ -n "${{ inputs.hiddenlayer-client-id }}" && -n "${{ secrets.HIDDENLAYER_CLIENT_SECRET }}" ]]; then
+            echo "should-submit=true" >> $GITHUB_OUTPUT
+            echo "::notice::HiddenLayer credentials provided - will submit results to platform"
+          else
+            echo "should-submit=false" >> $GITHUB_OUTPUT
+            echo "::warning::HiddenLayer credentials not provided - scan results will not be submitted to platform"
+          fi
+      
+      - name: Set job variables
+        run: |
+          # Create sanitized repository name for display and artifact names
+          sanitized_repo=$(echo "${{ matrix.repository }}" | tr '/' '-')
+          echo "SANITIZED_REPO=$sanitized_repo" >> $GITHUB_ENV
+          echo "REPO_DISPLAY=${{ matrix.repository }}" >> $GITHUB_ENV
+          
+          # Display what we're scanning
+          echo "::notice::Scanning HuggingFace model: ${{ matrix.repository }}"
+          
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-python@v1
+      
+      - name: Download HuggingFace model
+        id: download
+        run: |
+          echo "::group::Downloading ${{ matrix.repository }} from HuggingFace"
+          echo "::notice::Processing HuggingFace model: ${{ matrix.repository }}"
+          
+          model_dir="${{ github.workspace }}/hf_models/${{ matrix.repository }}"
+          mkdir -p "$model_dir"
+          
+          python3 << EOF
+          from huggingface_hub import snapshot_download
+          import sys
+          
+          try:
+              snapshot_download(
+                  repo_id='${{ matrix.repository }}',
+                  local_dir='$model_dir',
+                  local_dir_use_symlinks=False,
+                  cache_dir='$model_dir/.cache'
+              )
+              print("✅ Model downloaded successfully")
+          except Exception as e:
+              print(f"❌ Failed to download model: {e}")
+              sys.exit(1)
+          EOF
+          
+          # Get commit SHA from HuggingFace cache structure
+          repo_id="${{ matrix.repository }}"
+          modified_repo_id="${repo_id//\//--}"
+          commit_file="${model_dir}/models--${modified_repo_id}/refs/main"
+          
+          if [ -f "$commit_file" ]; then
+            commit_sha=$(cat "$commit_file")
+            short_sha=$(echo "$commit_sha" | cut -c1-7)
+            echo "commit-sha=$short_sha" >> $GITHUB_OUTPUT
+            echo "::notice::Found revision for ${{ matrix.repository }}: $short_sha"
+          else
+            # Try alternative locations
+            alt_commit_file="${model_dir}/.cache/models--${modified_repo_id}/refs/main"
+            if [ -f "$alt_commit_file" ]; then
+              commit_sha=$(cat "$alt_commit_file")
+              short_sha=$(echo "$commit_sha" | cut -c1-7)
+              echo "commit-sha=$short_sha" >> $GITHUB_OUTPUT
+              echo "::notice::Found revision for ${{ matrix.repository }}: $short_sha"
+            else
+              echo "commit-sha=unknown" >> $GITHUB_OUTPUT
+              echo "::warning::Could not determine revision for ${{ matrix.repository }}"
+            fi
+          fi
+          
+          echo "model-dir=$model_dir" >> $GITHUB_OUTPUT
+          echo "::endgroup::"
+      
+      - name: Login to Container Registry
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/docker-login@v1
+        with:
+          quay-username: ${{ inputs.quay-username }}
+          quay-token: ${{ secrets.QUAY_TOKEN }}
+      
+      - name: Scan HuggingFace model
+        id: scan
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/model-scanner@v1
+        with:
+          scan-path: ${{ steps.download.outputs.model-dir }}
+          model-scanner-version: ${{ inputs.model-scanner-version }}
+          license: ${{ secrets.HL_LICENSE_MODELSCANNER }}
+          output-file: hf_scan_results_${{ strategy.job-index }}.json
+      
+      - name: Submit scan results
+        id: submit
+        if: steps.check-creds.outputs.should-submit == 'true'
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/submit-scan-results@v1
+        with:
+          scan-results-file: hf_scan_results_${{ strategy.job-index }}.json
+          client-id: ${{ inputs.hiddenlayer-client-id }}
+          client-secret: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+          auth-url: ${{ inputs.hiddenlayer-auth-url }}
+          api-url: ${{ inputs.hiddenlayer-api-url }}
+          console-url: ${{ inputs.hiddenlayer-console-url }}
+          model-name: ${{ github.repository }}
+          model-version: "${{ matrix.repository }}:${{ steps.download.outputs.commit-sha }}"
+          origin: 'Hugging Face'
+      
+      - name: Retrieve SARIF Results
+        id: sarif
+        if: steps.check-creds.outputs.should-submit == 'true' && steps.submit.outputs.scan-id != ''
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-sarif-results@v1
+        with:
+          scan-id: ${{ steps.submit.outputs.scan-id }}
+          client-id: ${{ inputs.hiddenlayer-client-id }}
+          client-secret: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+          auth-url: ${{ inputs.hiddenlayer-auth-url }}
+          api-url: ${{ inputs.hiddenlayer-api-url }}
+          output-file: hf_scan_results_${{ strategy.job-index }}.sarif
+      
+      - name: Retrieve AIBOM Results
+        id: aibom
+        if: steps.check-creds.outputs.should-submit == 'true' && steps.submit.outputs.scan-id != ''
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/retrieve-aibom-results@v1
+        with:
+          scan-id: ${{ steps.submit.outputs.scan-id }}
+          client-id: ${{ inputs.hiddenlayer-client-id }}
+          client-secret: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+          auth-url: ${{ inputs.hiddenlayer-auth-url }}
+          api-url: ${{ inputs.hiddenlayer-api-url }}
+          output-file: hf_aibom_${{ strategy.job-index }}.cdx.json
+      
+      - name: Upload SARIF to GitHub Security
+        id: upload-sarif
+        if: steps.sarif.outputs.sarif-file != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.sarif.outputs.sarif-file }}
+          category: hiddenlayer-model-scanner-hf-${{ env.SANITIZED_REPO }}
+        continue-on-error: true
+      
+      - name: Check SARIF Upload Status
+        if: steps.sarif.outputs.sarif-file != '' && always()
+        run: |
+          if [ "${{ steps.upload-sarif.outcome }}" == "success" ]; then
+            echo "✅ SARIF file successfully uploaded to GitHub Security tab"
+          else
+            echo "::warning::SARIF upload failed. This may be due to:"
+            echo "::warning::  - Code scanning not being enabled for this repository"
+            echo "::warning::  - Insufficient permissions to upload SARIF results"
+            echo "::warning::  - Network or service issues"
+            echo "::warning::You can still download the SARIF file from the workflow artifacts"
+          fi
+      
+      - name: Generate detection report
+        if: always()
+        run: |
+          # Generate a markdown report of detections
+          python3 << 'EOF'
+          import json
+          
+          categories = [
+              "Arbitrary Code Execution", "Arbitrary Read Access",
+              "Decompression Vulnerabilities", "Denial of Service",
+              "Directory Traversal", "Embedded Payloads", "Graph Payload",
+              "Network Requests", "Suspicious Functions", "Repository Sideloading"
+          ]
+          
+          with open('hf_scan_results_${{ strategy.job-index }}.json', 'r') as f:
+              results = json.load(f)
+          
+          report = f"### Model Scan Report: ${{ matrix.repository }}\n\n"
+          report += "| Detection Category | Status |\n"
+          report += "|-------------------|--------|\n"
+          
+          found_categories = set()
+          for file_result in results.get('file_results', []):
+              for detection in file_result.get('detections', []):
+                  found_categories.add(detection.get('category'))
+          
+          for category in categories:
+              status = "❌ Detected" if category in found_categories else "✅ Clean"
+              report += f"| {category} | {status} |\n"
+          
+          with open('scan_report_${{ strategy.job-index }}.md', 'w') as f:
+              f.write(report)
+          EOF
+      
+      - name: Upload scan artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-results-${{ env.SANITIZED_REPO }}
+          path: |
+            hf_scan_results_${{ strategy.job-index }}.json
+            hf_scan_results_${{ strategy.job-index }}.sarif
+            hf_aibom_${{ strategy.job-index }}.cdx.json
+            scan_report_${{ strategy.job-index }}.md
+          if-no-files-found: warn
+      
+      - name: Check HiddenLayer ignores
+        id: check-ignores
+        if: inputs.enforce-scan-detections == 'true' && steps.scan.outputs.detections-found == 'true'
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/check-hiddenlayer-ignores@v1
+        with:
+          scan-results-file: hf_scan_results_${{ strategy.job-index }}.json
+          hiddenlayer-file: ${{ github.workspace }}/.hiddenlayer
+      
+      - name: Enforce scan detections
+        if: inputs.enforce-scan-detections == 'true' && steps.check-ignores.outputs.has-actionable-detections == 'true'
+        run: |
+          echo "::error::Security vulnerabilities detected in HuggingFace model: ${{ matrix.repository }} that are not ignored or have expired ignores"
+          echo "::error::Actionable rule IDs: ${{ steps.check-ignores.outputs.actionable-rule-ids }}"
+          exit 1
+
+  summary:
+    name: Scan Summary
+    runs-on: ${{ inputs.runs-on }}
+    if: always()
+    needs: [scan-repository, scan-external-models, extract-models]
+    outputs:
+      aggregated-detections-found: ${{ steps.aggregate.outputs.detections-found }}
+      aggregated-detection-summary: ${{ steps.aggregate.outputs.detection-summary }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Aggregate detection results
+        id: aggregate
+        run: |
+          # Initialize variables
+          detections_found="false"
+          detection_summaries=""
+          
+          # Check repository scan results
+          if [ "${{ needs.scan-repository.outputs.detections-found }}" == "true" ]; then
+            detections_found="true"
+            detection_summaries="Repository: ${{ needs.scan-repository.outputs.detection-summary }}"
+          fi
+          
+          # Check HuggingFace scan results (by job result since we can't access individual matrix outputs)
+          if [ "${{ needs.scan-external-models.result }}" == "failure" ] && [ "${{ inputs.enforce-scan-detections }}" == "true" ]; then
+            # If HF scan failed with enforcement on, it likely found detections
+            detections_found="true"
+            if [ -n "$detection_summaries" ]; then
+              detection_summaries="$detection_summaries; HuggingFace models: Detections found"
+            else
+              detection_summaries="HuggingFace models: Detections found"
+            fi
+          fi
+          
+          # Set outputs
+          echo "detections-found=$detections_found" >> $GITHUB_OUTPUT
+          if [ "$detections_found" == "true" ]; then
+            echo "detection-summary=${detection_summaries:-Detections found}" >> $GITHUB_OUTPUT
+          else
+            echo "detection-summary=No security issues detected" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "::notice::Aggregated detection status: $detections_found"
+          echo "::notice::Aggregated summary: ${detection_summaries:-No detections}"
+        
+      - name: Download all scan artifacts
+        id: download-all
+        if: always()
+        run: |
+          echo "::group::Downloading all scan artifacts"
+          
+          # Create directory for consolidated results
+          mkdir -p consolidated-scan-results
+          
+          # Download repository scan results if available
+          if gh run download ${{ github.run_id }} -n repository-scan-results -D consolidated-scan-results 2>/dev/null; then
+            echo "✅ Downloaded repository scan results"
+          else
+            echo "⚠️ No repository scan results found"
+          fi
+          
+          # Download all HuggingFace scan results
+          artifact_count=0
+          for artifact in $(gh run view ${{ github.run_id }} --json artifacts -q '.artifacts[].name' | grep '^scan-results-'); do
+            if gh run download ${{ github.run_id }} -n "$artifact" -D "consolidated-scan-results/$artifact" 2>/dev/null; then
+              echo "✅ Downloaded $artifact"
+              ((artifact_count++))
+            fi
+          done
+          
+          echo "Downloaded $artifact_count HuggingFace scan artifacts"
+          echo "::endgroup::"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      
+      - name: Setup Python
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-python@v1
+      
+      - name: Create consolidated scan results
+        id: consolidate
+        if: always()
+        run: |
+          echo "::group::Creating consolidated scan results"
+          
+          # Python script to merge all scan results
+          python3 << 'EOF'
+          import json
+          import os
+          import glob
+          
+          consolidated = {
+              "consolidated": True,
+              "repository_scan": None,
+              "huggingface_scans": [],
+              "total_detections": 0,
+              "files_with_detections": [],
+              "all_detections": []
+          }
+          
+          # Process repository scan
+          repo_scan_path = "consolidated-scan-results/repo_scan_results.json"
+          if os.path.exists(repo_scan_path):
+              print(f"Processing repository scan: {repo_scan_path}")
+              with open(repo_scan_path, 'r') as f:
+                  repo_scan = json.load(f)
+                  consolidated["repository_scan"] = repo_scan
+                  
+                  # Extract detections
+                  for file_result in repo_scan.get('file_results', []):
+                      if file_result.get('detections'):
+                          for detection in file_result['detections']:
+                              detection_info = {
+                                  "source": "repository",
+                                  "file": file_result.get('file_location', file_result.get('file_path', 'unknown')),
+                                  "detection": detection
+                              }
+                              consolidated["all_detections"].append(detection_info)
+                              consolidated["total_detections"] += 1
+                          consolidated["files_with_detections"].append({
+                              "source": "repository",
+                              "file": file_result.get('file_location', file_result.get('file_path', 'unknown')),
+                              "detection_count": len(file_result['detections'])
+                          })
+          
+          # Process HuggingFace scans
+          hf_scan_patterns = [
+              "consolidated-scan-results/scan-results-*/hf_scan_results_*.json",
+              "consolidated-scan-results/hf_scan_results_*.json"
+          ]
+          
+          for pattern in hf_scan_patterns:
+              for scan_file in glob.glob(pattern):
+                  print(f"Processing HuggingFace scan: {scan_file}")
+                  with open(scan_file, 'r') as f:
+                      hf_scan = json.load(f)
+                      
+                      # Extract model name from directory
+                      dir_name = os.path.dirname(scan_file)
+                      model_name = dir_name.split('scan-results-')[-1] if 'scan-results-' in dir_name else "unknown"
+                      
+                      scan_info = {
+                          "model": model_name,
+                          "scan": hf_scan
+                      }
+                      consolidated["huggingface_scans"].append(scan_info)
+                      
+                      # Extract detections
+                      for file_result in hf_scan.get('file_results', []):
+                          if file_result.get('detections'):
+                              for detection in file_result['detections']:
+                                  detection_info = {
+                                      "source": f"huggingface:{model_name}",
+                                      "file": file_result.get('file_location', file_result.get('file_path', 'unknown')),
+                                      "detection": detection
+                                  }
+                                  consolidated["all_detections"].append(detection_info)
+                                  consolidated["total_detections"] += 1
+                              consolidated["files_with_detections"].append({
+                                  "source": f"huggingface:{model_name}",
+                                  "file": file_result.get('file_location', file_result.get('file_path', 'unknown')),
+                                  "detection_count": len(file_result['detections'])
+                              })
+          
+          # Create summary
+          consolidated["summary"] = {
+              "total_detections": consolidated["total_detections"],
+              "total_files_with_detections": len(consolidated["files_with_detections"]),
+              "repository_detections": len([d for d in consolidated["all_detections"] if d["source"] == "repository"]),
+              "huggingface_detections": len([d for d in consolidated["all_detections"] if d["source"].startswith("huggingface:")])
+          }
+          
+          # Write consolidated results
+          with open("consolidated_scan_results.json", 'w') as f:
+              json.dump(consolidated, f, indent=2)
+          
+          print(f"\nConsolidation complete:")
+          print(f"  Total detections: {consolidated['total_detections']}")
+          print(f"  Repository detections: {consolidated['summary']['repository_detections']}")
+          print(f"  HuggingFace detections: {consolidated['summary']['huggingface_detections']}")
+          print(f"  Files with detections: {len(consolidated['files_with_detections'])}")
+          EOF
+          
+          echo "::endgroup::"
+      
+      - name: Upload consolidated scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: consolidated-scan-results
+          path: consolidated_scan_results.json
+          if-no-files-found: warn
+        
+      - name: Generate summary
+        id: generate-summary
+        run: |
+          echo "## 📊 Model Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### AI Models Overview" >> $GITHUB_STEP_SUMMARY
+          echo "**Total AI models found:** ${{ needs.extract-models.outputs.models-found-count || '0' }}" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ needs.extract-models.outputs.ai-assets-summary }}" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Summary:** ${{ needs.extract-models.outputs.ai-assets-summary }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**AI Scan Artifacts:**" >> $GITHUB_STEP_SUMMARY
+          echo "- 🤖 [AI Models Analysis Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#:~:text=ai-scan-results)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Repository Scan" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.scan-repository.result }}" == "success" ]; then
+            echo "✅ Repository scan completed successfully" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Artifacts:**" >> $GITHUB_STEP_SUMMARY
+            echo "- 📄 [Scan Results (JSON)](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#:~:text=repository-scan-results)" >> $GITHUB_STEP_SUMMARY
+            echo "- 🛡️ [SARIF Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#:~:text=repository-scan-results)" >> $GITHUB_STEP_SUMMARY
+            echo "- 📦 [AIBOM (CycloneDX)](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#:~:text=repository-scan-results)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Repository scan failed or found issues" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### HuggingFace Models" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.scan-external-models.result }}" == "success" ]; then
+            echo "✅ All HuggingFace model scans completed successfully" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Artifacts available for each model:**" >> $GITHUB_STEP_SUMMARY
+            echo "- Scan Results (JSON)" >> $GITHUB_STEP_SUMMARY
+            echo "- SARIF Reports" >> $GITHUB_STEP_SUMMARY
+            echo "- AIBOMs (CycloneDX)" >> $GITHUB_STEP_SUMMARY
+            echo "- Detection Reports (Markdown)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "[View all HuggingFace artifacts →](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.scan-external-models.result }}" == "skipped" ]; then
+            echo "⏭️ No HuggingFace models found to scan" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Some HuggingFace model scans failed or found issues" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 📥 Download All Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "[Access all scan artifacts →](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          
+          # Note about potential artifact retrieval issues
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "*Note: Some artifacts (SARIF, AIBOM) may not be available if retrieval from HiddenLayer platform failed. Check workflow logs for details.*" >> $GITHUB_STEP_SUMMARY
+          echo "*SARIF files will be uploaded to GitHub Security tab if Code Security is enabled and permissions allow.*" >> $GITHUB_STEP_SUMMARY
+          
+          # Prepare summary for PR comment
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "pr-comment-needed=true" >> $GITHUB_OUTPUT
+          else
+            echo "pr-comment-needed=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Create PR Comment
+        if: steps.generate-summary.outputs.pr-comment-needed == 'true' && inputs.create-pr-comment == 'true'
+        uses: hiddenlayerai/hl-aisec-platform-development-workflow/pr-comment@v1
+        with:
+          comment-identifier: 'hiddenlayer-model-scanner-summary'
+          comment-body: |
+            # 🔍 HiddenLayer Model Scanner Results
+            
+            ## 🤖 AI Models Overview
+            **Total AI models detected:** ${{ needs.extract-models.outputs.models-found-count || '0' }}
+            ${{ needs.extract-models.outputs.ai-assets-summary && format('**Summary:** {0}', needs.extract-models.outputs.ai-assets-summary) || '' }}
+            
+            ### 📎 AI Analysis Artifacts
+            - [🤖 AI Models Analysis Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#:~:text=ai-scan-results)
+            
+            ## Repository Scan
+            **Status:** ${{ needs.scan-repository.outputs.detections-found == 'true' && '⚠️ Issues Found' || '✅ Clean' }}
+            **Summary:** ${{ needs.scan-repository.outputs.detection-summary || 'No scan performed' }}
+            
+            ### 📎 Repository Artifacts
+            - [📄 Scan Results (JSON)](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#:~:text=repository-scan-results)
+            - [🛡️ SARIF Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#:~:text=repository-scan-results) 
+            - [📦 AIBOM (CycloneDX)](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#:~:text=repository-scan-results)
+            
+            ## HuggingFace Models
+            ${{ needs.extract-models.outputs.has-huggingface == 'true' && format('Scanned {0} HuggingFace models from codebase', needs.extract-models.outputs.huggingface-repos) || 'No HuggingFace models found in codebase' }}
+            
+            ${{ needs.extract-models.outputs.has-huggingface == 'true' && '### 📎 HuggingFace Model Artifacts
+            View artifacts for each scanned model in the [workflow artifacts section](https://github.com/' || '' }}${{ needs.extract-models.outputs.has-huggingface == 'true' && github.repository || '' }}${{ needs.extract-models.outputs.has-huggingface == 'true' && '/actions/runs/' || '' }}${{ needs.extract-models.outputs.has-huggingface == 'true' && github.run_id || '' }}${{ needs.extract-models.outputs.has-huggingface == 'true' && '):
+            - **Scan Results** (JSON)
+            - **SARIF Reports** (Security findings)
+            - **AIBOMs** (CycloneDX format)
+            - **Detection Reports** (Markdown summaries)' || '' }}
+            
+            ---
+            *Scanned with HiddenLayer Model Scanner v${{ inputs.model-scanner-version }}*
+            *View all artifacts in the [Actions artifacts](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+            
+            <sub>Note: Some artifacts (SARIF, AIBOM) may not be available if retrieval from HiddenLayer platform failed.</sub>
+            <sub>SARIF files will be uploaded to GitHub Security tab if Code Security is enabled and permissions allow.</sub>
