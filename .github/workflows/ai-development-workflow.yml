@@ -253,7 +253,10 @@ jobs:
       enforce-scan-detections: ${{ inputs.enforce-scan-detections }}
       quay-username: ${{ inputs.quay-username }}
       create-pr-comment: 'false'  # Disable individual PR comment
-    secrets: inherit
+    secrets:
+      HIDDENLAYER_CLIENT_SECRET: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+      HL_LICENSE_MODELSCANNER: ${{ secrets.HL_LICENSE_MODELSCANNER }}
   
   red-team:
     name: Red Teaming
@@ -286,7 +289,16 @@ jobs:
       hiddenlayer-console-url: ${{ inputs.hiddenlayer-console-url }}
       quay-username: ${{ inputs.quay-username }}
       create-pr-comment: 'false'  # Disable individual PR comment
-    secrets: inherit
+    secrets:
+      HIDDENLAYER_CLIENT_SECRET: ${{ secrets.HIDDENLAYER_CLIENT_SECRET }}
+      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+      HL_LICENSE_AUTOMATED_RED_TEAMING: ${{ secrets.HL_LICENSE_AUTOMATED_RED_TEAMING }}
+      HL_LICENSE_AIDR: ${{ secrets.HL_LICENSE_AIDR }}
+      HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+      SERVICE_ENV_SECRETS: ${{ secrets.SERVICE_ENV_SECRETS }}
+      SERVICE_ENV_SECRETS_AIDR: ${{ secrets.SERVICE_ENV_SECRETS_AIDR }}
+      AIDR_ENV_SECRETS: ${{ secrets.AIDR_ENV_SECRETS }}
+      SERVICE_REGISTRY_TOKEN: ${{ secrets.SERVICE_REGISTRY_TOKEN }}
   
   summary:
     name: Workflow Summary
