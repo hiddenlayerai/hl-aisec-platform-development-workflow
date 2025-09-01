@@ -220,7 +220,7 @@ jobs:
       scan-id: ${{ steps.run-red-teaming.outputs.scan-id }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: Setup Docker Network
         id: network-setup
@@ -530,7 +530,7 @@ jobs:
       scan-id: ${{ steps.run-red-teaming.outputs.scan-id }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: Setup Docker Network
         id: network-setup
@@ -1017,7 +1017,7 @@ jobs:
       report-summary: ${{ steps.combine-reports.outputs.summary }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: Generate Basic Report
         id: report-basic

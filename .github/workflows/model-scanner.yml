@@ -90,7 +90,7 @@ jobs:
       ai-assets: ${{ steps.scan.outputs.ai-assets }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: Scan for AI models
         id: scan
@@ -247,7 +247,7 @@ jobs:
           fi
       
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           lfs: true
       
@@ -419,7 +419,7 @@ jobs:
           echo "::notice::Scanning HuggingFace model: ${{ matrix.repository }}"
           
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: Setup Python
         uses: hiddenlayerai/hl-aisec-platform-development-workflow/setup-python@v1
@@ -624,7 +624,7 @@ jobs:
       aggregated-detection-summary: ${{ steps.aggregate.outputs.detection-summary }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         
       - name: Aggregate detection results
         id: aggregate
