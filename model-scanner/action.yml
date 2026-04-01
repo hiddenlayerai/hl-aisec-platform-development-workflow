@@ -106,3 +106,4 @@ runs:
         echo "::group::Scan Summary"
         echo "$scan_results" | jq '.scan_summary'
         echo "::endgroup::" 
+        
